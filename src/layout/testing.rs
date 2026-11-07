@@ -5,7 +5,7 @@
 //! `meta["val"]` to hand-built FX graphs (for example
 //! `backends/transforms/test/test_propagate_view_copy_permute_pass.py`), so
 //! fixtures cannot drift from the shapes the passes will compute. That covers
-//! the TOSA ops the explicit-mode rewrites create (`shape/tosa.rs`), whose
+//! the TOSA ops the layout rewrites create (`shape/tosa.rs`), whose
 //! `CONST_SHAPE` operands [`LayoutGraph::const_shape`] builds. Assertions read
 //! live call targets in graph order.
 

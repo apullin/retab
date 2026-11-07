@@ -11,7 +11,7 @@
 //!
 //! rc4 also decomposes round, sqrt and sign before phase 6 (`:611-629`), which
 //! RETAB lowers in the serializer. That gap is closed in the pipeline instead:
-//! explicit mode runs those decompositions ahead of phase 6 (APU-157), so the
+//! the pipeline runs those decompositions ahead of phase 6 (APU-157), so the
 //! passes stay faithful ports.
 //!
 //! # A 16-bit table's RESCALE
@@ -33,8 +33,9 @@
 //! tests/fixtures/layout_replay/gen_layout_replay.py). A split table that
 //! survives a pass therefore marks a place where rc4 itself keeps the TABLE
 //! and its RESCALE apart; whatever lowers it must emit the TABLE alone and
-//! let the RESCALE node do the shift (the explicit-mode serializer's job once
-//! it is wired; `fx_insert_table_ops_ir` plans the shifted table either way).
+//! let the RESCALE node do the shift, which ingest's `apply_precomputed_table`
+//! does for a table marked `table_rescale_split`; `fx_insert_table_ops_ir`
+//! plans the shifted table either way.
 
 use std::collections::HashMap;
 

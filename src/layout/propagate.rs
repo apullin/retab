@@ -2383,7 +2383,7 @@ mod tests {
         assert_eq!(g.shape(g.id("permute_copy")), [1, 3, 4, 2]);
     }
 
-    /// A grouped conv in explicit mode: IrRewriteConv's per-group outputs are
+    /// A grouped conv: IrRewriteConv's per-group outputs are
     /// int8 NHWC values, their cat is a quantized compute node RETAB keeps as
     /// float32 with int8 qparams (design F2), and FuseIdenticalInputTransforms
     /// has sunk the groups' NCHW permutes below it as one permute, whose val it

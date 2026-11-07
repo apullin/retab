@@ -4,8 +4,7 @@
 //! pre-permuted weight as given (no second permutation, design B1) and declares the
 //! val's shape with the accumulator's dtype (G1, A9); the RESCALE reads the
 //! accumulator; the only layout ops are the rewrite's TRANSPOSEs (and conv1d's
-//! RESHAPEs), with no peephole folding them away (G5); and no node serializes at a
-//! shape other than its val's (D1). A16W8 convs whose
+//! RESHAPEs); and no node serializes at a shape other than its val's (D1). A16W8 convs whose
 //! INT48 accumulators branch to int32 consumers, U55 clones included, serialize too.
 
 use super::collection::{check_layout_invariants, collect_regions, SerializedGraphItems};

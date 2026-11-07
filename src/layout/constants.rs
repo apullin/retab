@@ -1,4 +1,4 @@
-//! Explicit mode's stand-in for rc4's ComputeConstantOpsAOTPass and
+//! The pipeline's stand-in for rc4's ComputeConstantOpsAOTPass and
 //! FuseConstantArgsPass (`backends/arm/_passes/fuse_constant_ops_pass.py`,
 //! line numbers below are that file's), which rc4 runs back to back at
 //! `arm_pass_manager.py:699-700` (APU-135 P2, critique B8).
@@ -86,7 +86,7 @@ pub(crate) fn constant_kind(node: &IrNode) -> LoweringInputKind {
 }
 
 /// rc4's ComputeConstantOpsAOTPass and FuseConstantArgsPass, applied in the IR
-/// for explicit mode (see the module docs). `in_region` is the pipeline's
+/// (see the module docs). `in_region` is the pipeline's
 /// region flag: region constants are `get_attr` nodes.
 pub(crate) struct IrMaterializeConstantsPass {
     pub(crate) in_region: bool,
@@ -2093,7 +2093,7 @@ mod tests {
     /// (`ingest/from_ir.rs`), so a cond predicate the pass folded inside a
     /// region became the string "pred_pre_computed" and lost its constant. It
     /// now treats only a `get_attr` without data as a region reference, so the
-    /// explicit route keeps the tensor predicate that the effect route gets by
+    /// in-IR route keeps the tensor predicate that the effect route gets by
     /// folding the predicate at ingest. Exporting a nested
     /// `torch.cond(torch.full((), True), ...)` inside a branch gives this shape.
     #[test]
@@ -2171,7 +2171,7 @@ mod tests {
         );
         assert_eq!(predicate(&converted, &store), Ok(Some(vec![1])));
 
-        // Explicit route: the pass folds the predicate into a region get_attr.
+        // In-IR route: the pass folds the predicate into a region get_attr.
         let mut materialized = build();
         assert!(run_in_region(&mut materialized));
         let mut store = TensorStore::new();

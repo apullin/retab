@@ -71,10 +71,9 @@
 //!   permuted parameter loses the compensating permute rc4 keeps on the
 //!   folded constant, and a product of two parameters gets two compensating
 //!   permutes where rc4 inserts one). APU-135 P2 S0a's
-//!   IrMaterializeConstantsPass (`src/layout/constants.rs`, on layout/rc4-port
-//!   since the merge at 1092ab8) materializes the folds as placeholders with
-//!   tensor data (`get_attr` in a region) at rc4's slot. Explicit mode must
-//!   not run this pass before that pass has run.
+//!   IrMaterializeConstantsPass (`src/layout/constants.rs`) materializes the
+//!   folds as placeholders with tensor data (`get_attr` in a region) at rc4's
+//!   slot. The pipeline must not run this pass before IrMaterializeConstants.
 //! - **The retrace.** rc4 ends with `ExportPass.call`, which re-derives every
 //!   node's value (`:451-453`). The port re-derives only the values a rewrite
 //!   can change, in graph order: the region, the views it remaps, the nodes it

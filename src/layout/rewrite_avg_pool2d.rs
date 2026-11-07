@@ -600,8 +600,9 @@ mod tests {
     ///   q(5) = 30.
     ///
     /// IrMaterializeConstants gives the same, with the output map empty or
-    /// absent (RETAB's import leaves it out) and in a region. The dim-order
-    /// planner would quantize the first pool's zero points with its input
+    /// absent (RETAB's import leaves it out) and in a region. The planner
+    /// alone, as the effect passes run it (IrFuseZeroInputConstantsEffectPass's
+    /// rule), would quantize the first pool's zero points with its input
     /// qparams: round(-3 / 0.1) - 3 = -33 and round(0 / 0.1) - 3 = -3.
     #[test]
     fn zero_points_of_a_pool_without_output_qparams_stay_unquantized() {

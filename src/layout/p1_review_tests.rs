@@ -169,9 +169,10 @@ fn fuse_view_copy_refreshes_meta_for_a_rank0_final_view() {
 /// `view(x, [2,-1]) -> relu`, both with shape `(2, 12)`. Export keeps the `-1`
 /// (rc4 resolves it only in ResolveViewCopyInferredDimPass,
 /// `arm_pass_manager.py:745`, after FuseViewCopyTransformPass), but the port
-/// copies the size argument into the retained nodes' shapes verbatim. Today's
-/// serializer re-resolves a negative dim, but the passes in between read val
-/// shapes, and so will the explicit-mode serializer (port plan, P2).
+/// copies the size argument into the retained nodes' shapes verbatim. The
+/// serializer still re-resolves a negative dim (`actual_tensor_shape`), but the
+/// passes in between read val shapes, and RETAB_DEBUG's invariant check (P2
+/// design D1) compares each val with the serialized shape.
 #[test]
 fn fuse_view_copy_resolves_an_inferred_dim_in_the_final_view() {
     let mut g = LayoutGraph::new();

@@ -93,10 +93,8 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     for &dim in &dims {
         stat_shape[dim as usize] = 1;
     }
-    // Plain logical [1, ..., normalized_shape] param shape, matching upstream
-    // decompose_layernorm_pass.py (`weights_reshaped_shape`). The weight/bias
-    // views flow through normal NHWC annotation — no physical channels-last
-    // shape, no permute, no layout-neutral marks.
+    // Plain [1, ..., normalized_shape] param shape, matching upstream
+    // decompose_layernorm_pass.py (`weights_reshaped_shape`).
     let param_shape: Vec<i64> = (0..rank)
         .map(|idx| {
             if dims.contains(&(idx as i64)) {

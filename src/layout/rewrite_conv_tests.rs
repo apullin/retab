@@ -1081,7 +1081,7 @@ fn capture_from_parent(graph: &mut IrGraph, conv: NodeId, index: usize) -> NodeI
 /// gets its layout change as runtime ops on the branch input's quantize, a
 /// `permute_copy` and, for HWCM and conv1d, a `view_copy`; the last is named
 /// as rc4 names the constant, `{c}_weight_<suffix>`. A captured bias stays,
-/// unmarked: explicit mode's captured_conv folds both into region constants
+/// unmarked: captured_conv folds both into region constants
 /// after the boundary contracts (`control_flow::captured_conv`). Everything
 /// else is the parent's rewrite.
 #[test]
@@ -1257,7 +1257,7 @@ fn captured_region_weights_read_through_views_and_unmarked_biases() {
 /// rewrite's qparam-less output permute: it reverse engineers the RESCALE as a
 /// rescale of the TOSA conv's inherited output qparam, which with a
 /// per-tensor weight gives `s_out^2 / (s_in * s_w)` instead of the conv's
-/// `s_out`. So explicit mode does not let a region output's contract take
+/// `s_out`. So RETAB does not let a region output's contract take
 /// this walk: it records the output's qparam from the region's output
 /// dequantize, as rc4's FoldAndAnnotateQParamsPass does
 /// (`contracts::rewrite_output_dequantize_boundaries_ir`), and region convs
@@ -1400,7 +1400,7 @@ fn read_through_control_flow(
     getitem
 }
 
-/// Drop the slices rc4's SizeAdjustInputPass made, so that RETAB's explicit
+/// Drop the slices rc4's SizeAdjustInputPass made, so that RETAB's
 /// IrSizeAdjustInput makes its own.
 fn drop_rc4_slices(graph: &mut IrGraph) {
     for slice in calls(graph, "aten.slice_copy.Tensor").into_iter().rev() {
@@ -1429,7 +1429,7 @@ fn output_contract_finds_a_target(graph: &IrGraph, getitem: NodeId) -> bool {
 }
 
 /// Review of APU-155 S3: a strided conv reading a cond or while output first
-/// gets explicit IrSizeAdjustInput's slices, and those carry emptied qparam
+/// gets IrSizeAdjustInput's slices, and those carry emptied qparam
 /// maps, as rc4's do (`fx_size_adjust_input_ir.rs` module docs). The output
 /// contract then finds no target qparam among the getitem's direct consumers,
 /// whether or not the conv is rewritten (`control_flow_hazard`). So without a
@@ -1438,11 +1438,6 @@ fn output_contract_finds_a_target(graph: &IrGraph, getitem: NodeId) -> bool {
 /// would remove the aten conv that sends the graph to stock at serialization,
 /// and the output RESCALE would be missing whenever the branch output qparams
 /// differ from the parent's.
-///
-/// Before S8 a conv1d's rank-3 input was the one case nothing else caught: the
-/// contracts stamped a dim order on every rank-4 cond output, and
-/// `reject_dim_orders` sent such a graph to stock at serialization, but a
-/// rank-3 or rank-5 output got no dim order.
 #[test]
 fn convs_reading_control_flow_outputs_through_size_adjust_slices_fall_back_until_s8() {
     for (name, sliced_dims) in [
@@ -1499,7 +1494,7 @@ fn convs_reading_control_flow_outputs_through_size_adjust_slices_fall_back_until
 
 /// The walk back from the conv stops at the first node the output contract
 /// reads, so a conv whose control-flow output has a target qparam is rewritten
-/// through explicit IrSizeAdjustInput's slices. That holds when the getitem
+/// through IrSizeAdjustInput's slices. That holds when the getitem
 /// has output qparams, and when the getitem's consumer is a view with input
 /// qparams (an edge view the quantizer annotated) whose output is sliced.
 #[test]

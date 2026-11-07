@@ -37,9 +37,7 @@
 //! (design §2.1), and [`assign_val`] is `node.meta["val"] = value` on a node
 //! that exists. A value fresh from a fake kernel or
 //! `permute_fake_tensor_metadata` (`arm_pass_utils.py:820-830`) is
-//! contiguous, so its dim order is the identity ([`mark_contiguous`]). RETAB's
-//! other layout facts are copied like any other key; explicit mode never
-//! writes them.
+//! contiguous, so its dim order is the identity ([`mark_contiguous`]).
 //!
 //! RETAB's importer drops an empty qparam map (`NodeMeta::from_fx`), so a map
 //! rc4 holds empty is absent on an imported node. Maps these helpers empty

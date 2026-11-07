@@ -260,8 +260,7 @@ impl ConvCase {
         };
         assert_eq!(attribute.scale32, accumulator != DType::Int48);
 
-        // B2, G4 and G5: the output permute keeps the val, with no peephole and no
-        // inferred output-layout TRANSPOSE.
+        // Exactly the two layout TRANSPOSEs, and the output permute keeps the val.
         let (to_first, _) = layout_dims(self.input.len());
         assert_eq!(ops_of(items, Op::Transpose).len(), 2);
         assert_eq!(
@@ -355,8 +354,8 @@ fn assert_shape_operands_declared(items: &SerializedGraphItems) {
 
 #[test]
 fn conv2d_serializes_ohwi_weights_val_shapes_and_pads_as_given() {
-    // rc4's CONV2D for Conv2d(3, 8, (3, 5), padding=(1, 2)) on [1, 3, 6, 10]. OHWI
-    // [8, 3, 5, 3]: the dim-order serializer permuted it again to [8, 5, 3, 3] (B1).
+    // rc4's CONV2D for Conv2d(3, 8, (3, 5), padding=(1, 2)) on [1, 3, 6, 10], whose OHWI
+    // weight [8, 3, 5, 3] serializes as given (B1).
     let case = ConvCase {
         target: "backend.tosa.CONV2D.default",
         input: &[1, 6, 10, 3],
@@ -379,14 +378,10 @@ fn conv2d_serializes_ohwi_weights_val_shapes_and_pads_as_given() {
 
 #[test]
 fn depthwise_hwcm_weights_keep_their_layout_and_the_val_shape() {
-    // KW == 1 weights matched the dim-order serializer's OIHW guess (B3): [3, 1, 4, 2]
-    // would give a [1, 7, 5, 3] output, [1, 1, 4, 2] a [1, 2, 4, 1] one. [4, 1, 2, 2]
-    // (KH % C == 0) was also re-permuted as OIHW by its weight plan (B1). IrRewriteConv
-    // makes KW == 1 weights routinely through the Cin = 1 depthwise rule (design §2.4,
-    // Risk 4): cumsum's [K, 1, 1, 1] and Linear(in=1)'s [1, 1, 1, Co]. Dim-order logic got
-    // both wrong: [5, 1, 1, 1] became [1, 1, 1, 5] with a [3, 13, 4, 5] output, and
-    // [1, 1, 1, 6] became [1, 6, 1, 1] with a [1, 4, 6, 1] output. Each case is the
-    // DEPTHWISE_CONV2D rc4 emits for the module in its comment.
+    // HWCM weights serialize as given (B1, B3), KW == 1 ones included: IrRewriteConv makes
+    // those routinely through the Cin = 1 depthwise rule (design §2.4, Risk 4), cumsum's
+    // [K, 1, 1, 1] and Linear(in=1)'s [1, 1, 1, Co]. Each case is the DEPTHWISE_CONV2D
+    // rc4 emits for the module in its comment, and its output is the val.
     for (input, weight, params, val) in [
         // Conv2d(4, 8, (3, 1), groups=4, stride=2, padding=(1, 0)) on [1, 4, 16, 11]
         (

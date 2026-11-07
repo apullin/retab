@@ -428,7 +428,7 @@ fn plan_precomputed_table(
 /// The TABLE this pass plans for `node`, as `run` plans it: the table
 /// constant's bytes, shape and dtype, and the left shift of the RESCALE that
 /// follows a 16-bit table (0: none). `None` when `node` is not a quantized
-/// table op or its table can't be precomputed. The explicit-layout
+/// table op or its table can't be precomputed. The layout port of
 /// FuseDuplicateUsers compares these where stock compares TABLE nodes and
 /// their table constants (`layout::fuse_duplicate_users`).
 pub(crate) fn planned_table(node: &IrNode) -> Option<InsertPrecomputedTableOpEffect> {

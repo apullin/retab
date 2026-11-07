@@ -9,7 +9,7 @@ mod contracts;
 mod metadata;
 
 pub(crate) use assembly::append_subgraphs_from_ir;
-// Explicit-mode serializer tests convert regions without linking Python (APU-135 S8).
+// The serializer tests convert regions without linking Python (APU-135 S8).
 #[cfg(test)]
 pub(crate) use assembly::try_append_subgraphs_from_ir;
 pub(crate) use contracts::{
@@ -94,8 +94,8 @@ pub(crate) fn collect_region_metadata(
     (while_cond_graph_names, while_body_input_counts)
 }
 
-/// Control-flow hierarchies for the contract tests below and the explicit-mode
-/// serializer tests (APU-135 S8).
+/// Control-flow hierarchies for the contract tests below and the serializer
+/// tests (APU-135 S8).
 #[cfg(test)]
 pub(crate) mod fixtures {
     use std::collections::BTreeMap;

@@ -1,4 +1,4 @@
-//! Shape rules for the TOSA ops the explicit-mode rewrites create (APU-135
+//! Shape rules for the TOSA ops the layout rewrites create (APU-135
 //! P2, design S0): ports of rc4's fake kernels in
 //! `backends/arm/tosa/dialect/ops/` for CONV2D, DEPTHWISE_CONV2D,
 //! TRANSPOSE_CONV2D, CONV3D, MAX_POOL2D, AVG_POOL2D and RESIZE. RESCALE's rule

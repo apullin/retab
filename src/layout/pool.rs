@@ -1,4 +1,4 @@
-//! What the explicit-mode pool rewrites share (APU-135 P2 S7, design §3.1 and
+//! What the pool rewrites share (APU-135 P2 S7, design §3.1 and
 //! §3.2): rc4's argument helpers read from RETAB's IR arguments, the pad
 //! adjustment, and the NHWC permute orders both pool rewrites (and the
 //! upsample rewrite) wrap their TOSA op in.

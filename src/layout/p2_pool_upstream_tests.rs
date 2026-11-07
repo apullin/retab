@@ -16,8 +16,8 @@
 //! `test_get_resize_parameters_1d_rejects_non_constant_symbolic_ratio`. The
 //! symbolic constant-ratio test is ported at the symbol's hint. rc4's op tests
 //! (`test_avg_pool2d.py`, `test_max_pool.py`, `test_upsample_*.py`) count TOSA
-//! ops only on FP8 pipelines, which RETAB doesn't lower; their INT cases
-//! belong to the explicit-mode op-suite run once S6 wires these passes.
+//! ops only on FP8 pipelines, which RETAB doesn't lower; their INT cases are
+//! covered by the op-suite run, as RETAB's pipeline runs these rewrites.
 
 use crate::fx_ir::{IrArg, IrNode, IrPass, NodeMeta, NodeOp};
 use crate::layout::rewrite_avg_pool2d::IrRewriteAvgPool2dPass;

@@ -366,7 +366,7 @@ fn erase_dead_operand_chain(ir: &mut IrGraph, start: NodeId) {
     }
 }
 
-/// The TOSA convolutions explicit mode's IrRewriteConv makes. Their weight is
+/// The TOSA convolutions IrRewriteConv makes. Their weight is
 /// argument 1 and their bias argument 2, as `aten.convolution`'s.
 fn is_tosa_conv(node: &IrNode) -> bool {
     node.op == NodeOp::CallFunction
@@ -384,7 +384,7 @@ enum LayoutOp {
     Reshape(Vec<i64>),
 }
 
-/// Explicit mode's `_rewrite_weight` for a captured weight (RCP:328-403).
+/// rc4's `_rewrite_weight` for a captured weight (RCP:328-403).
 struct WeightRewrite {
     region: String,
     conv: NodeId,
@@ -638,7 +638,7 @@ fn while_captured_bias(
     Some(while_capture_reason("bias", name, conv, loop_region))
 }
 
-/// Explicit layout mode's captured_conv (APU-135 S8; P2 design §4.3). Returns
+/// captured_conv (APU-135 S8; P2 design §4.3). Returns
 /// the number of rewritten operands, or requests a stock fallback.
 ///
 /// IrRewriteConv leaves a region conv's captured operands for this step: a
@@ -798,7 +798,7 @@ mod tests {
         assert!(requantize_bias(&data, &[(1.0, 0)], 1.0, 1.0, &[1.0, 1.0]).is_none());
     }
 
-    // -- Explicit layout mode (APU-135 S8) -----------------------------------
+    // -- Captured operands (APU-135 S8) --------------------------------------
 
     use crate::fx_ir::i64_list_arg;
     use crate::layout::dtype::special_dtype;
@@ -906,7 +906,7 @@ mod tests {
         parent
     }
 
-    /// A region as explicit IrRewriteConv leaves a conv1d over captured
+    /// A region as IrRewriteConv leaves a conv1d over captured
     /// operands, after the boundary contracts: branch inputs `x_ph`, `w_ph` and
     /// `b_ph`; the weight's and bias's boundary RESCALEs, of `weight_scale` and
     /// `bias_scale` (`None` leaves the operand without one); the weight's
@@ -991,8 +991,7 @@ mod tests {
             .collect()
     }
 
-    /// Run the explicit captured_conv; returns its count and the fallback it
-    /// requested.
+    /// Run captured_conv; returns its count and the fallback it requested.
     fn rewrite_captured(
         parent: &IrGraph,
         submodules: &mut BTreeMap<String, StashedPipeline>,
@@ -1292,7 +1291,7 @@ mod tests {
     /// rc4's RewriteConvPass keeps a quantized conv's bias whose dtype is int32,
     /// runtime or constant (RCP:925-933), so captured_conv keeps it too: a cond
     /// branch's captured weight is rewritten, and its int32 branch input stays
-    /// the bias. (`explicit_region_constants_stay` keeps a constant one.)
+    /// the bias. (`region_constants_stay` keeps a constant one.)
     #[test]
     fn captured_conv_keeps_a_runtime_int32_bias() {
         let parent = parent_graph(COND, ["true_graph", "false_graph"]);

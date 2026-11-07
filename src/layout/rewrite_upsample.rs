@@ -43,7 +43,7 @@
 //! RETAB lacks, turns into an avg pool first. An output shape that differs from
 //! the upsample's val is declined rather than trusted (rc4's border makes the
 //! two agree by construction). The `.default` overloads aren't rc4's targets;
-//! they stay aten ops, which the serializer's explicit-mode guard (X5) sends
+//! they stay aten ops, which the serializer's aten spatial-op guard (X5) sends
 //! to stock.
 
 use std::collections::HashMap;
@@ -1161,7 +1161,7 @@ mod tests {
     }
 
     /// rc4 targets the `.vec` overloads only; a `.default` stays an aten op,
-    /// which the serializer's explicit-mode guard sends to stock (X5).
+    /// which the serializer's aten spatial-op guard sends to stock (X5).
     #[test]
     fn default_overloads_are_left_to_the_serializer_guard() {
         crate::stock_fallback::take();

@@ -238,8 +238,8 @@ fn violates_worst_case(shape: &[i64]) -> bool {
 }
 
 /// Append one line about a permute this pass judged to the `RETAB_U55_PERMUTE_LOG`
-/// file: its name, its input's shape and value dtype, its dims, what decided it and
-/// whether it is split. Write errors are ignored.
+/// file: its name, its input's shape and value dtype, its dims, the probe's verdict
+/// and whether it is split. Write errors are ignored.
 fn log_judgement(path: &str, line: String) {
     use std::io::Write;
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {

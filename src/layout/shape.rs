@@ -10,7 +10,7 @@
 //! view and permute copies, pointwise ops with numpy broadcasting, transparent
 //! copies, `mean.dim` and `sum.dim_IntList`, `slice_copy`, `cat` and
 //! `backend.tosa.RESCALE`, plus the TOSA convolutions, pools and RESIZE the
-//! explicit-mode rewrites create, ported from rc4's fake kernels (`shape/tosa.rs`).
+//! layout rewrites create, ported from rc4's fake kernels (`shape/tosa.rs`).
 //! A target without a rule is an error, never a guess.
 //!
 //! Three rules decide what a refresh changes:
@@ -43,10 +43,9 @@
 //!   so a moved view or permute keeps the qparams it had.
 //!
 //! Everything else in the meta is left alone, as rc4 assigns only
-//! `meta["val"]`. The value's strides are the exception: in explicit mode
-//! every value is contiguous, as rc4's retrace leaves it, so the refreshed
-//! value gets the identity `val_dim_order` (see [`mark_contiguous`]). The other
-//! layout facts stay; explicit mode never writes them.
+//! `meta["val"]`. The value's strides are the exception: every value is
+//! contiguous, as rc4's retrace leaves it, so the refreshed value gets the
+//! identity `val_dim_order` (see [`mark_contiguous`]).
 
 use std::fmt;
 
@@ -130,7 +129,7 @@ enum Rule {
     Slice,
     Cat,
     Rescale,
-    /// A TOSA op an explicit-mode rewrite creates (`shape/tosa.rs`).
+    /// A TOSA op a layout rewrite creates (`shape/tosa.rs`).
     Tosa(TosaOp),
 }
 
@@ -425,9 +424,9 @@ impl<'n, 'a> Operands<'n, 'a> {
     }
 }
 
-/// Give `meta` the identity dim order of its value's rank. In explicit mode
-/// every value is contiguous, as rc4's retrace leaves it; only
-/// `IrNormalizeDelegateIOLayout` reads the exported dim orders.
+/// Give `meta` the identity dim order of its value's rank. Every value is
+/// contiguous, as rc4's retrace leaves it; only `IrNormalizeDelegateIOLayout`
+/// reads the exported dim orders.
 pub(crate) fn mark_contiguous(meta: &mut NodeMeta) {
     if let Some(rank) = meta.tensor_facts().map(|facts| facts.shape.len()) {
         meta.set_val_dim_order((0..rank).collect());

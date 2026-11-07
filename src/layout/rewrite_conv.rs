@@ -1,4 +1,4 @@
-//! Explicit mode's port of rc4's RewriteConvPass
+//! Port of rc4's RewriteConvPass
 //! (`backends/arm/_passes/rewrite_conv_pass.py`, "RCP" below with its line
 //! numbers), APU-135 P2 S3 and S4 (APU-155).
 //!
@@ -29,7 +29,7 @@
 //!
 //! **Constants.** rc4 runs the pass after ComputeConstantOpsAOT and
 //! FuseConstantArgs (`arm_pass_manager.py:699-700`), so a weight is always a
-//! constant placeholder there; explicit mode runs `IrMaterializeConstantsPass`
+//! constant placeholder there; the pipeline runs `IrMaterializeConstantsPass`
 //! at that slot (`layout::constants`), so a weight RETAB's planners can
 //! evaluate is a constant node here too and the pass reads its tensor. The
 //! pre-permuted weight is a new constant of the source's kind, inserted
@@ -43,7 +43,7 @@
 //! left alone (design §2.2): rc4 folds it at `:700`, and RETAB folds it when a
 //! planner can (`IrMaterializeConstantsPass`, or the effect keyed by its name);
 //! one no planner folds reaches the serializer as an aten conv, and its
-//! explicit-mode guard hands the graph to stock.
+//! aten spatial-op guard (`reject_aten_spatial_ops`) hands the graph to stock.
 //!
 //! **Dtypes** (design F2). RETAB keeps a quantized activation's val float32
 //! and its dtype in qparams, so rc4's fake-dtype tests read qparams here
@@ -97,9 +97,8 @@
 //!
 //! **U55 permute splits** (design F8). rc4 judges whatever permutes are
 //! alive at `arm_pass_manager.py:736`, after this pass, including the ones
-//! this pass creates. Explicit mode's `IrDecomposePermuteForU55` does the
-//! same on U55, asking Python's Vela probe, so this pass leaves the split to
-//! it.
+//! this pass creates. `IrDecomposePermuteForU55` does the same on U55,
+//! asking Python's Vela probe, so this pass leaves the split to it.
 //!
 //! **Regions** (APU-135 S8; design §2.9, §4.3). A region's constants are
 //! `get_attr` nodes (`GraphScope::Region`). A weight or bias the region
@@ -110,17 +109,17 @@
 //! (`control_flow::contracts::apply_boundary_contracts`), after the region
 //! pipeline. So a captured weight gets its layout change as runtime ops on the
 //! branch input, `permute_copy(W, dims)` and for HWCM and conv1d a
-//! `view_copy(·, shape)`, and a captured bias stays as it is; explicit mode's
-//! captured_conv folds both into region constants after the boundary
+//! `view_copy(·, shape)`, and a captured bias stays as it is; captured_conv
+//! folds both into region constants after the boundary
 //! contracts (`control_flow::captured_conv`). A captured operand is a branch
 //! input read directly or through its boundary quantize and data-movement
 //! copies, the chain captured_conv can resolve (`captured_branch_input`).
 //!
 //! **Control-flow outputs.** A conv reading a cond or while output whose
 //! getitem has no output qparams, directly or through copies without input
-//! qparams, such as explicit IrSizeAdjustInput's slices, requests a stock
+//! qparams, such as IrSizeAdjustInput's slices, requests a stock
 //! fallback when the cond or while carries no recorded target for that output
-//! (see `control_flow_hazard`); explicit mode records the targets before
+//! (see `control_flow_hazard`); RETAB records the targets before
 //! IrFoldQdq, so in its pipeline that leaves only outputs no quantize
 //! followed. FP8 is out of scope (design F1).
 //!
@@ -209,7 +208,7 @@ const HWCM: [usize; 4] = [2, 3, 0, 1];
 const CONV1D_HWCM: [usize; 3] = [1, 2, 0];
 const CONV1D_OHWI: [usize; 3] = [0, 2, 1];
 
-/// rc4's RewriteConvPass for explicit layout mode; see the module docs.
+/// rc4's RewriteConvPass; see the module docs.
 pub(crate) struct IrRewriteConvPass {
     /// `get_context_spec().is_U55_subset` (RCP:1273): whether A16W8
     /// accumulators feeding several RESCALEs are separated, one TOSA
@@ -219,8 +218,7 @@ pub(crate) struct IrRewriteConvPass {
     pub(crate) is_u55_subset: bool,
     /// The pipeline's region flag: constants are `get_attr` nodes
     /// (`GraphScope::Region`), and weights and biases captured from the parent
-    /// graph are left for explicit mode's captured_conv (design §2.9; see the
-    /// module docs).
+    /// graph are left for captured_conv (design §2.9; see the module docs).
     pub(crate) in_region: bool,
 }
 
@@ -588,22 +586,22 @@ fn to_i64(dims: &[usize]) -> Vec<i64> {
 /// permute has none, as rc4's does, and the region's output RESCALE would be
 /// lost. This holds in a region too, for the output of a cond it holds.
 ///
-/// (A region output's own qparam is safe: explicit mode records it from the
+/// (A region output's own qparam is safe: RETAB records it from the
 /// region's output dequantize, as rc4's FoldAndAnnotateQParamsPass does, so
 /// the output contract does not reverse engineer the rewrite's qparam-less
 /// RESCALE; `contracts::rewrite_output_dequantize_boundaries_ir`.)
 ///
 /// The lookup also fails when the conv reads such a getitem through
 /// data-movement copies without input qparams (`control_flow_output_read`).
-/// Explicit IrSizeAdjustInput builds its slices with emptied qparam maps, as
-/// rc4's `create_node(from_node=...)` does, and `IrDecomposeLinear`'s input
-/// views and `IrDecomposeGroupedConv`'s group slices have none in either
-/// mode. The contract then finds no target whether or not the conv is
-/// rewritten. But the aten conv sends the graph to stock at serialization
-/// (the explicit-mode aten-conv guard), and the rewritten graph would
-/// serialize without the output RESCALE. So these convs fall back too, unless
-/// the cond or while carries a recorded target for the output: explicit mode
-/// records them before IrFoldQdq, from the quantize after each getitem, which
+/// IrSizeAdjustInput builds its slices with emptied qparam maps, as rc4's
+/// `create_node(from_node=...)` does, and `IrDecomposeLinear`'s input views
+/// and `IrDecomposeGroupedConv`'s group slices have none. The contract then
+/// finds no target whether or not the conv is rewritten. But the aten conv
+/// sends the graph to stock at serialization (the serializer's aten spatial-op
+/// guard, `reject_aten_spatial_ops`), and the rewritten graph would serialize
+/// without the output RESCALE. So these convs fall back too, unless the cond
+/// or while carries a recorded target for the output: RETAB records them
+/// before IrFoldQdq, from the quantize after each getitem, which
 /// is where rc4's InsertControlFlowRescalesPass target comes from at APM:595
 /// (`control_flow::IrRecordControlFlowRescaleTargetsPass`), and the contract
 /// takes a recorded target whatever the graph shows by then.
@@ -681,8 +679,8 @@ enum WeightOperand<'g> {
     Constant(&'g IrNode),
     /// A region weight captured from the parent graph, with its value: rc4
     /// resolves it to the parent's constant (`_resolve_control_flow_constant`,
-    /// RCP:223-261); here it gets runtime layout ops, which explicit mode's
-    /// captured_conv folds (see the module docs).
+    /// RCP:223-261); here it gets runtime layout ops, which captured_conv folds
+    /// (see the module docs).
     Captured(TensorFacts),
 }
 
@@ -725,7 +723,7 @@ fn weight_operand(
 /// read directly or through its boundary quantize, which the boundary
 /// contracts turn into the boundary RESCALE (or drop), a RESCALE, and the
 /// data-movement copies RETAB puts on a weight (a Linear's weight view). These
-/// are the chains explicit mode's captured_conv folds after the contracts
+/// are the chains captured_conv folds after the contracts
 /// (`control_flow::captured_conv`), as rc4's `_resolve_control_flow_constant`
 /// follows RESCALEs and branch inputs (RCP:223-261).
 fn captured_branch_input(graph: &IrGraph, operand: NodeId) -> Option<NodeId> {
@@ -779,8 +777,8 @@ enum BiasRewrite {
     Keep(NodeId),
     /// `_add_bias`'s zeros (RCP:160-195).
     Zeros(TensorData),
-    /// A region bias captured from the parent graph, which stays: explicit
-    /// mode's captured_conv requantizes it into the int32 bias, and marks that
+    /// A region bias captured from the parent graph, which stays: captured_conv
+    /// requantizes it into the int32 bias, and marks that
     /// INT48 for an int16 activation, after the boundary contracts
     /// (`_rewrite_control_flow_bias`, RCP:263-326).
     Captured(NodeId),
@@ -994,8 +992,8 @@ fn plan(
                 && !(is_constant(graph.node(bias)) && graph.node(bias).op == NodeOp::GetAttr) =>
         {
             // RCP:925-931 requantizes a captured bias through the boundary
-            // RESCALEs, which RETAB inserts at serialization: explicit mode's
-            // captured_conv does it then, and sends a quantized conv whose bias
+            // RESCALEs, which RETAB inserts at serialization: captured_conv does
+            // it then, and sends a quantized conv whose bias
             // is still not int32 to stock, as rc4's TOSA kernel rejects it.
             if captured_branch_input(graph, bias).is_none() {
                 return Err(format!(

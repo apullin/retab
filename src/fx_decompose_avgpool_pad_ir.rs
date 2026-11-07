@@ -10,8 +10,8 @@
 use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass};
 use crate::fx_target::is_plain_avg_pool2d_target;
 // Post padding needed so TOSA's explicit pre/post padding reproduces aten's
-// symmetric pad + ceil/floor output-size rounding; shared with the explicit-mode
-// pool rewrites.
+// symmetric pad + ceil/floor output-size rounding; shared with the pool
+// rewrites.
 use crate::layout::pool::adjust_pooling_pad_if_needed;
 use crate::runner_logging::log_line;
 

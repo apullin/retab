@@ -28,7 +28,7 @@
 //! helpers: a created layout copy takes its producer's val dtype
 //! (`layout::shape`), and a created TOSA convolution, RESIZE or RESCALE
 //! records rc4's dtype in its val (design §2.7, §3.3). So does the product
-//! explicit-mode `IrRewriteMatmulRescale` rescales, which is RETAB's MATMUL
+//! `IrRewriteMatmulRescale` rescales, which is RETAB's MATMUL
 //! (`fx_rewrite_matmul_ir`).
 //!
 //! A special dtype is a separate fact in rc4 too: an INT48 accumulator's fake
@@ -207,7 +207,7 @@ pub(crate) fn matmul_output_dtype(input: &str) -> Option<&'static str> {
 ///    takes its dtype argument (RETAB vals already hold it), and the passes
 ///    creating a convolution or RESIZE write rc4's dtype into the val. RETAB
 ///    keeps `aten.mm`/`aten.bmm` where rc4's RewriteMatmulPass (APM:724) makes
-///    a MATMUL: explicit-mode `IrRewriteMatmulRescale` writes MATMUL's dtype,
+///    a MATMUL: `IrRewriteMatmulRescale` writes MATMUL's dtype,
 ///    int32 for integer inputs, into the val of the product it rescales, so an
 ///    mm or bmm whose val holds an integer dtype counts here. Before that
 ///    rewrite its val is float32 (design F2), and rule 2 gives the dtype of
@@ -293,7 +293,7 @@ fn records_value_dtype(target: &str) -> bool {
 }
 
 /// RETAB's MATMUL: an `aten.mm` or `aten.bmm` whose val holds an integer
-/// dtype, which explicit-mode `IrRewriteMatmulRescale` writes when it rescales
+/// dtype, which `IrRewriteMatmulRescale` writes when it rescales
 /// the product; see [`value_dtype`].
 fn is_typed_matmul(node: &IrNode, val_dtype: &str) -> bool {
     node.is_mm_or_bmm() && !is_float_dtype(val_dtype)
@@ -519,7 +519,7 @@ mod tests {
     /// (`backends/arm/tosa/dialect/ops/matmul.py:33-39`); a RESCALE with empty
     /// maps follows. rc4 dump in .venv-et16: `tosa_matmul_default ::
     /// int32[1, 4, 3] iq={0:int8,1:int8} oq={0:int8}`. RETAB keeps the
-    /// `aten.bmm` with the same maps, and explicit-mode IrRewriteMatmulRescale
+    /// `aten.bmm` with the same maps, and IrRewriteMatmulRescale
     /// (phase-6 slot 4, before P3's MoveDataMovementOpsToSmallerDtype) puts the
     /// RESCALE after it and writes MATMUL's int32 into the bmm's val, which
     /// rule 1 reads. `_uses_wider_dtype` then sees rc4's int32 -> int8 RESCALE,

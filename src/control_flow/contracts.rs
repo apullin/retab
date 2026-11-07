@@ -289,7 +289,7 @@ fn infer_output_qparams_map_ir(
 }
 
 /// The output RESCALE targets of cond or while node `cf_id`: the ones recorded
-/// before the explicit-mode passes ([`IrRecordControlFlowRescaleTargetsPass`]),
+/// before the layout passes ([`IrRecordControlFlowRescaleTargetsPass`]),
 /// then, for outputs without a recorded target, the ones the graph shows now
 /// (`infer_output_qparams_map_ir`). Without a record, only the latter.
 fn output_targets_ir(graph: &fx_ir::IrGraph, cf_id: fx_ir::NodeId) -> Vec<(usize, fx_ir::QParam)> {
@@ -367,13 +367,13 @@ pub(crate) fn record_control_flow_output_targets_ir(graph: &mut fx_ir::IrGraph) 
     cf_ids.len() as u32
 }
 
-/// Explicit mode records its control-flow output targets before IrFoldQdq. rc4
+/// RETAB records its control-flow output targets before IrFoldQdq. rc4
 /// inserts a cond or while output's RESCALE at `arm_pass_manager.py:595`
 /// (InsertControlFlowRescalesPass), before any layout pass, from the getitem's
 /// output qparams; RETAB inserts it at serialization (`apply_boundary_contracts`),
-/// after the whole pipeline. By then the explicit passes can have put copies
+/// after the whole pipeline. By then the layout passes can have put copies
 /// without qparams between a getitem and the consumer that held its target
-/// (IrMatchArgRanks' views, explicit IrSizeAdjustInput's slices, the conv and
+/// (IrMatchArgRanks' views, IrSizeAdjustInput's slices, the conv and
 /// upsample rewrites' input permutes, propagated permutes and views), and even
 /// before `:595` IrDecomposeLinear's views and IrInsertInt32Rescale's RESCALEs
 /// can stand in for that consumer, while IrFoldQdq annotates a getitem only
@@ -980,7 +980,7 @@ mod tests {
         )
     }
 
-    /// A cond branch ending in explicit IrRewriteConv's conv1d chain, as rc4
+    /// A cond branch ending in IrRewriteConv's conv1d chain, as rc4
     /// builds it: the TOSA conv inherits the conv's qparams (input 0.02 and
     /// weight 0.005, output `(0.04, 7)`); its RESCALE, squeeze view and output
     /// permute have none; the branch output's dequantize carries the output's
@@ -1218,7 +1218,7 @@ mod tests {
         parent
     }
 
-    /// The true branch after explicit mode's pipeline: IrMaterializeConstants
+    /// The true branch after the pipeline: IrMaterializeConstants
     /// folded `full((10,), 3.0)` into a region constant without qparams, and the
     /// output's dequantize carries the branch's quantization.
     fn constant_branch_region() -> IrGraph {
@@ -1348,7 +1348,7 @@ mod tests {
         assert_eq!((target.scale, target.zp), (0.5, 1));
     }
 
-    /// After the explicit passes a copy without qparams can stand between a
+    /// After the layout passes a copy without qparams can stand between a
     /// getitem and the consumer that held its target (here a propagated
     /// permute), and the graph then shows no target; the recorded one still
     /// reaches the contract. Without the record the output stays unrescaled.

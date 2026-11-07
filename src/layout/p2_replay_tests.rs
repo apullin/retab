@@ -789,7 +789,7 @@ fn rewrite_avg_pool2d_matches_rc4() {
 }
 
 /// RewriteAvgPool2dPass then ComputeConstantOpsAOTPass, as rc4's pipeline runs
-/// them (`arm_pass_manager.py:698-699`): explicit mode's IrMaterializeConstants
+/// them (`arm_pass_manager.py:698-699`): RETAB's IrMaterializeConstants
 /// takes the second slot, so the two passes together give rc4's quantized
 /// zero-point buffers at the graph head (critique A7).
 #[test]
@@ -980,8 +980,8 @@ fn review_per_channel_qparams_import_like_ir_fold_qdq() {
 /// erases the rewritten aten conv (design §2.3 step 9), or leaves §2.8(c)'s
 /// unused squeeze view, RESCALE and permute, fails. Nothing downstream removes
 /// such a node reliably (LayoutCtx::finish doesn't DCE; ingest drops dead
-/// calls only when an effect applied), and in explicit mode a leftover aten
-/// conv would reach the X5 guard and silently send the graph to stock.
+/// calls only when an effect applied), and a leftover aten conv would reach
+/// the X5 guard and silently send the graph to stock.
 #[test]
 fn review_p2_hooks_reject_leftover_dead_nodes() {
     use crate::fx_ir::{IrArg, NodeMeta, NodeOp};

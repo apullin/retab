@@ -1,4 +1,4 @@
-//! Explicit mode's ports of the three rc4 decompositions that run before
+//! Ports of the three rc4 decompositions that run before
 //! phase 6 (APU-135 P2 S9, design §4.4): `DecomposeRoundPass`
 //! (`backends/arm/_passes/decompose_round_pass.py`, `arm_pass_manager.py:611`),
 //! `DecomposeSqrtPass` (`decompose_sqrt_pass.py`, `:617`) and
@@ -9,7 +9,7 @@
 //! replaced them by the time its phase-6 layout passes run, and those passes
 //! treat the replacement differently from the original: FuseViewCopyTransform
 //! fuses a view across a unary op such as `aten.sign`, but not across the
-//! `where` its decomposition ends with (`layout::pending`). Explicit mode
+//! `where` its decomposition ends with (`layout::pending`). The pipeline
 //! therefore runs the three ports at their rc4 positions: after the Q/DQ fold,
 //! because two of them read qparams, and before `IrReplaceScalarWithTensor`
 //! (rc4's `:656`), because they create `.Scalar` ops.

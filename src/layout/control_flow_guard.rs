@@ -1,4 +1,4 @@
-//! Explicit mode's stock fallback for control-flow outputs whose boundary
+//! The pipeline's stock fallback for control-flow outputs whose boundary
 //! contract cannot find its target qparam (APU-135 P2 and S8).
 //!
 //! RETAB inserts a cond or while output's RESCALE at serialization
@@ -6,16 +6,16 @@
 //! comes from `infer_output_qparams_map_ir`: the getitem's own output qparams,
 //! else the input qparams of one of its direct consumers, else a dequantize
 //! consumer's. rc4 reads its targets at `arm_pass_manager.py:595`, before any
-//! layout pass runs. Explicit mode's passes can then put copies without
-//! qparams between a getitem and the consumer that held the target, as rc4's
-//! do: IrMatchArgRanks' rank views (`layout::match_arg_ranks`), explicit
+//! layout pass runs. The layout passes can then put copies without qparams
+//! between a getitem and the consumer that held the target, as rc4's do:
+//! IrMatchArgRanks' rank views (`layout::match_arg_ranks`),
 //! IrSizeAdjustInput's slices, and the input permutes of the upsample and
 //! conv rewrites (the pool rewrites' permutes keep the pool's qparams;
 //! `layout::meta`). The contract then finds no target,
 //! inserts no RESCALE, and the consumers read the region's output in the
 //! region's quantization.
 //!
-//! Explicit mode now records each output's target before IrFoldQdq, from the
+//! RETAB now records each output's target before IrFoldQdq, from the
 //! quantize that follows the getitem, as rc4 reads it
 //! (`control_flow::IrRecordControlFlowRescaleTargetsPass`), and the contract
 //! takes the recorded target, so a recorded output is never at risk
@@ -25,7 +25,7 @@
 //!
 //! IrRewriteConv requests the fallback for the convs it would rewrite
 //! (`control_flow_hazard` in `layout::rewrite_conv`). This pass runs after
-//! every explicit pass and requests it for any other such getitem: one
+//! every layout pass and requests it for any other such getitem: one
 //! without output qparams or a recorded target, with no direct consumer the
 //! contract can read, that reaches a node with input qparams through
 //! data-movement copies without input qparams. The target exists, but the
