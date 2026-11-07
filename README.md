@@ -191,8 +191,9 @@ uses a typed `OpTarget`, `EmitContext`, and an emitter dispatch table.
 
 See [docs/rust_lowering_architecture.md](docs/rust_lowering_architecture.md)
 for the current implementation map. Earlier design notes are under
-[docs/history/](docs/history/). The old direct-lowering lane remains recorded
-in [docs/FASTLANE_WORKFLOW.md](docs/FASTLANE_WORKFLOW.md).
+[docs/history/](docs/history/). The fork-only direct-lowering lane is no
+longer part of RETAB; it is parked as a speedup candidate and stays in git
+history.
 
 ## License
 
