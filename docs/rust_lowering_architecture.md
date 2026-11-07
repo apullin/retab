@@ -236,8 +236,8 @@ Maturin derives the Python package version from `Cargo.toml`.
 Benchmarks, the stock-versus-RETAB differential harness, and the model corpus
 are kept separately in a private repository.
 
-[ENVIRONMENT.md](ENVIRONMENT.md) records environment variables and legacy
-aliases. Earlier proposals are preserved in
+[ENVIRONMENT.md](ENVIRONMENT.md) records environment variables. Earlier
+proposals are preserved in
 [history/RUST_GRAPH_IR.md](history/RUST_GRAPH_IR.md) and
 [history/refactor_backlog.md](history/refactor_backlog.md); they are historical
 rather than a description of the current module layout.
