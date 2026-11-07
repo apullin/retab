@@ -4,8 +4,8 @@
 //! _to_dim_order_copy, _to_copy, alias_copy, copy, and detach_copy where
 //! input and output dtypes match.
 //!
-//! For `aten.copy.default`, cast and broadcast args[1] (the source) to the
-//! destination's dtype and shape. For all others, args[0] is the pass-through
+//! For `aten.copy.default`, cast and broadcast `args[1]` (the source) to the
+//! destination's dtype and shape. For all others, `args[0]` is the pass-through
 //! value.
 
 use crate::fx_fuse_consecutive_slices_ir::static_slice;
