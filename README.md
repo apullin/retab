@@ -198,4 +198,4 @@ in [docs/FASTLANE_WORKFLOW.md](docs/FASTLANE_WORKFLOW.md).
 
 ## License
 
-Apache-2.0
+Apache-2.0; see [LICENSE](LICENSE).
