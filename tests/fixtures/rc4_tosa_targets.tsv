@@ -70,7 +70,7 @@ backend.tosa.REDUCE_ANY.default	Other
 backend.tosa.REDUCE_MAX.default	TosaReduceMax
 backend.tosa.REDUCE_MIN.default	TosaReduceMin
 backend.tosa.REDUCE_PRODUCT.default	Other
-backend.tosa.REDUCE_SUM.default	TosaReduceSum
+backend.tosa.REDUCE_SUM.default	Other
 backend.tosa.RESCALE.default	TosaRescale
 backend.tosa.RESHAPE.default	TosaReshape
 backend.tosa.RESIZE.default	TosaResize

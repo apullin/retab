@@ -30,16 +30,6 @@ struct ParsedReduceSpec {
     keepdim: bool,
 }
 
-#[derive(Debug)]
-struct ParsedSingleAxisReduceSpec {
-    input_names: Vec<String>,
-    input_shape: Vec<i32>,
-    raw_axis: i32,
-    tosa_axis: i32,
-    keepdim: bool,
-    reduce_dtype: DType,
-}
-
 impl ParsedReduceSpec {
     // Parse reduction metadata once at the boundary. Downstream emitters can
     // then operate on typed axes instead of repeatedly validating raw args.
@@ -76,48 +66,6 @@ impl ParsedReduceSpec {
             input_shape,
             axes,
             keepdim,
-        }
-    }
-}
-
-impl ParsedSingleAxisReduceSpec {
-    fn parse(graph: &Graph, node: &Node, store: &TensorStore) -> Self {
-        let input_names = collect_input_names(graph, node);
-        let input_node = match node.args.first() {
-            Some(Arg::Node(input_id)) => graph.node(*input_id),
-            _ => None,
-        };
-
-        let raw_axis = {
-            let dims = arg_i32_list(node, 1);
-            if let Some(axis) = dims.first().copied() {
-                axis
-            } else {
-                kwarg_i32(node, "axis", 0)
-            }
-        };
-        let tosa_axis = input_node
-            .map(|input_node| normalize_axis(input_node, raw_axis))
-            .unwrap_or(raw_axis);
-        let keepdim = arg_bool(node, 2, true);
-        let input_shape = input_node
-            .map(|input_node| actual_tensor_shape(graph, store, input_node))
-            .unwrap_or_default();
-        let input_dtype = input_node
-            .map(|n| passthrough_input_dtype(graph, n))
-            .unwrap_or_else(|| node_output_dtype(node));
-        let reduce_dtype = match input_dtype {
-            DType::Int8 | DType::Int16 => DType::Int32,
-            _ => node_output_dtype(node),
-        };
-
-        Self {
-            input_names,
-            input_shape,
-            raw_axis,
-            tosa_axis,
-            keepdim,
-            reduce_dtype,
         }
     }
 }

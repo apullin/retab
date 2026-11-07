@@ -113,10 +113,6 @@ pub(crate) fn is_slice_shape_op(target: &OpTarget) -> bool {
     matches!(target, OpTarget::Slice | OpTarget::TosaSlice)
 }
 
-pub(crate) fn is_sum_reduction(target: &OpTarget) -> bool {
-    matches!(target, OpTarget::Sum | OpTarget::TosaReduceSum)
-}
-
 pub(crate) fn is_aten_sum(target: &OpTarget) -> bool {
     matches!(target, OpTarget::Sum)
 }

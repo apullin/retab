@@ -28,7 +28,6 @@ const TOSA_TARGETS: &[(&str, OpTarget)] = &[
     ("backend.tosa.RESHAPE.default", OpTarget::TosaReshape),
     ("backend.tosa.CLAMP.default", OpTarget::TosaClamp),
     ("backend.tosa.MATMUL.default", OpTarget::TosaMatmul),
-    ("backend.tosa.REDUCE_SUM.default", OpTarget::TosaReduceSum),
     ("backend.tosa.REDUCE_MAX.default", OpTarget::TosaReduceMax),
     ("backend.tosa.REDUCE_MIN.default", OpTarget::TosaReduceMin),
     ("backend.tosa.CONCAT.default", OpTarget::TosaConcat),

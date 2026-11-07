@@ -115,7 +115,6 @@ pub enum OpTarget {
     TosaAvgPool2d,
     TosaMaxPool2d,
     TosaClamp,
-    TosaReduceSum,
     TosaTable,
     TosaConcat,
     TosaSlice,

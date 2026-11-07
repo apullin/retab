@@ -151,68 +151,9 @@ fn sliced_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Optio
         .or_else(|| explicit_slice_size_shape(node, &input_shape))
 }
 
-fn reduced_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<Vec<i32>> {
-    if !op_semantics::is_sum_reduction(&node.target) {
-        return None;
-    }
-
-    if op_semantics::is_aten_sum(&node.target) {
-        return Some(raw_i32_shape(node));
-    }
-
-    let input_node = first_input_node(graph, node)?;
-    let input_shape = actual_tensor_shape(graph, store, input_node);
-    if input_shape.is_empty() {
-        return None;
-    }
-
-    let axes = arg_i32_list(node, 1);
-    if axes.is_empty() {
-        return None;
-    }
-    let keepdim = arg_bool(node, 2, false);
-    let mut output_shape = input_shape.clone();
-    let mut mapped_axes: Vec<usize> = axes
-        .into_iter()
-        .map(|axis| normalize_axis(input_node, axis) as usize)
-        .collect();
-
-    if keepdim {
-        for axis in mapped_axes {
-            if let Some(slot) = output_shape.get_mut(axis) {
-                *slot = 1;
-            }
-        }
-        return Some(output_shape);
-    }
-
-    let input_raw_shape = raw_i32_shape(input_node);
-    if input_raw_shape.len() == input_shape.len() {
-        let rank = input_raw_shape.len() as i32;
-        let mut raw_axes: Vec<usize> = arg_i32_list(node, 1)
-            .into_iter()
-            .map(|axis| if axis < 0 { axis + rank } else { axis })
-            .filter(|&axis| axis >= 0 && axis < rank)
-            .map(|axis| axis as usize)
-            .collect();
-        raw_axes.sort_unstable_by(|a, b| b.cmp(a));
-
-        let mut reduced_raw_shape = input_raw_shape;
-        for axis in raw_axes {
-            if axis < reduced_raw_shape.len() {
-                reduced_raw_shape.remove(axis);
-            }
-        }
-        return Some(reduced_raw_shape);
-    }
-
-    mapped_axes.sort_unstable_by(|a, b| b.cmp(a));
-    for axis in mapped_axes {
-        if axis < output_shape.len() {
-            output_shape.remove(axis);
-        }
-    }
-    Some(output_shape)
+/// An aten sum serializes at its val.
+fn reduced_tensor_shape(node: &Node) -> Option<Vec<i32>> {
+    op_semantics::is_aten_sum(&node.target).then(|| raw_i32_shape(node))
 }
 
 fn checked_numel(shape: &[i32]) -> Option<i64> {
@@ -369,7 +310,7 @@ fn actual_tensor_shape_impl(graph: &Graph, store: &TensorStore, node: &Node) -> 
         return shape;
     }
 
-    if let Some(shape) = reduced_tensor_shape(graph, store, node) {
+    if let Some(shape) = reduced_tensor_shape(node) {
         return shape;
     }
 

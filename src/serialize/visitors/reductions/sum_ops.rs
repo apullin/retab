@@ -2,52 +2,7 @@ use super::*;
 
 pub(super) fn register(table: &mut EmitterTable) {
     use crate::graph::ir::OpTarget;
-    table.extend([
-        (OpTarget::TosaReduceSum, emit_reduce_sum as EmitFn),
-        (OpTarget::Sum, emit_aten_sum),
-    ]);
-}
-
-pub(in crate::serialize::visitors) fn emit_reduce_sum(ctx: &EmitContext) -> EmitResult {
-    let graph = ctx.graph;
-    let node = ctx.node;
-    let store = ctx.store;
-    let spec = ParsedSingleAxisReduceSpec::parse(graph, node, store);
-    let mut result = EmitResult::default();
-
-    let mut reduce_shape = spec.input_shape.clone();
-    if let Some(slot) = reduce_shape.get_mut(spec.tosa_axis as usize) {
-        *slot = 1;
-    }
-
-    let reduce_output = if spec.keepdim {
-        node.name.clone()
-    } else {
-        format!("{}_reduce_axis{}", node.name, spec.raw_axis)
-    };
-
-    result.push_output_op(
-        TosaTensor::new(&reduce_output, reduce_shape.clone(), spec.reduce_dtype),
-        Op::ReduceSum,
-        Attribute::ReduceSum(ReduceSumAttribute {
-            axis: spec.tosa_axis,
-        }),
-        spec.input_names,
-    );
-
-    if !spec.keepdim {
-        let final_shape = ctx.shape();
-        push_reshape_with_shape(
-            &mut result,
-            reduce_output,
-            node.name.clone(),
-            format!("{}_shape", node.name),
-            final_shape,
-            ctx.dtype(),
-        );
-    }
-
-    result
+    table.extend([(OpTarget::Sum, emit_aten_sum as EmitFn)]);
 }
 
 pub(in crate::serialize::visitors) fn emit_aten_sum(ctx: &EmitContext) -> EmitResult {
