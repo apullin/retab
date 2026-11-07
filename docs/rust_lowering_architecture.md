@@ -142,11 +142,11 @@ serializer take each node's layout from its val.
 
 [../src/fx_meta.rs](../src/fx_meta.rs) owns `TensorFacts`, `NodeMeta`,
 `TensorMetaStamp`, and `QParamMap`. `fx_ir.rs` re-exports the metadata types
-used by passes. Tensor shape and dtype, input/output quantization, layout,
-and additional backend metadata belong to this domain.
+used by passes. Tensor shape, dtype and torch dim order (`val_dim_order`),
+input/output quantization, and passthrough backend keys belong to this domain.
 
-Passes must deliberately preserve, restamp, or clear tensor, quantization,
-and layout facts when replacing nodes. Shared metadata helpers and domain
+Passes must deliberately preserve, restamp, or clear tensor (including its dim
+order) and quantization facts when replacing nodes. Shared metadata helpers and domain
 modules such as `fx_quant.rs`, `fx_reduction.rs`, and `fx_index_domain.rs`
 keep these semantics consistent.
 
@@ -226,8 +226,7 @@ cargo test --lib --locked
 PYTHONPATH="$RETAB_ROOT/python" "$VENV/bin/python" -P -m pytest tests
 ```
 
-Homebrew `flatc` >= 25 must precede conda's `flatc` 24 on `PATH` for
-`tosa-rs` code generation. This crate is a `cdylib`; `cargo build --lib`
+This crate is a `cdylib`; `cargo build --lib`
 alone does not supply the required extension linkage. The
 `pyo3/extension-module` feature belongs only to maturin's feature list.
 Maturin derives the Python package version from `Cargo.toml`.
