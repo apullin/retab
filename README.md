@@ -83,9 +83,9 @@ uv pip install --python "$VENV/bin/python" \
   "tosa-tools==2026.5.0" "flatbuffers==25.2.10" maturin pytest
 ```
 
-An ExecuTorch source overlay is unnecessary for this wheel-based setup.
-The existing source-checkout installer is a separate workflow; see
-[docs/COMPANION_REPOS.md](docs/COMPANION_REPOS.md).
+This explicit install is the supported setup; RETAB ships no installer
+script. See [docs/COMPANION_REPOS.md](docs/COMPANION_REPOS.md) for the tested
+versions.
 
 ### Build and test
 

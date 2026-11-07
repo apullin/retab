@@ -17,8 +17,8 @@ Vela branch is required. The compatibility record is
 | tosa-tools | `2026.5.0` | [PyPI](https://pypi.org/project/tosa-tools/2026.5.0/) |
 | flatbuffers (Python) | `25.2.10` | PyPI |
 
-The tested interpreter is Python 3.12. The package's Python floor is 3.10;
-its runtime uses 3.10 union type syntax and does not import `tomllib`.
+The tested interpreter is Python 3.12. The package's Python floor is 3.10,
+which its union type syntax needs.
 ExecuTorch's Arm backend imports `torchao.prototype.mx_formats`, supplied by
 the tested torchao version.
 
@@ -52,15 +52,14 @@ The Rust `flatbuffers` runtime is pinned to `25.2.10` in Cargo.toml, the same
 version tosa-rs uses. This is separate from the Python `flatbuffers==25.2.10`
 package; do not infer one from the other.
 
-## Existing source-checkout helpers
+## Environment setup
 
-The wheel-based setup in [../README.md](../README.md#quick-start) is the
-current starting point. `scripts/bootstrap_uv.sh` and
-`scripts/install_executorch.sh` retain the source-overlay workflow. They need
-an existing environment and an explicitly supplied ExecuTorch source path
-(`--source` or `EXECUTORCH_SRC`). The installer also expects its source
-serializer tree and uses standard-library `tomllib`, requiring Python 3.11
-or newer for that script.
+The [README quick start](../README.md#quick-start) creates an environment with
+uv and installs the tested stack from PyPI. That explicit install is the
+supported setup: RETAB ships no installer script for the stack, and its build
+helpers need an existing environment and never create one. RETAB only needs an
+importable `executorch.backends.arm`, so an ExecuTorch built from a source
+checkout also works when it is a tested version.
 
 ## Updating the stack
 
