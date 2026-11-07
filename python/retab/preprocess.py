@@ -58,22 +58,6 @@ def _run_control_flow_submodule_rust_passes(
 ) -> None:
     from executorch.exir.graph_module import get_cond_while_submodules
 
-    if (
-        _env_get(
-            "RETAB_FORCE_CF_RECURSIVE_PASSES",
-            "ARM_TOSA_ENGINE_FORCE_CF_RECURSIVE_PASSES",
-        )
-        == "1"
-    ):
-        for name, submodule, _ in get_cond_while_submodules(gm):
-            retab.run_fx_passes(
-                submodule, edge_program, pipeline_config=pipeline_config
-            )
-            logger.info(
-                "[retab] ran recursive fx pass pipeline on control-flow submodule %s",
-                name,
-            )
-
     for name, submodule, cf_node in get_cond_while_submodules(gm):
         region_name = f"{region_prefix}__{name}" if region_prefix else name
         cf_target = str(getattr(cf_node, "target", ""))

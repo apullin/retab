@@ -17,7 +17,6 @@ not simply on whether the variable exists.
 | --- | --- | --- | --- |
 | `RETAB_DUMP_TOSA` | `ARM_TOSA_ENGINE_DUMP_TOSA` | `preprocess.py`: `_maybe_dump_tosa_artifacts`, `_compile_specs_safe_for_parallel` | A nonempty value is a file path. Creates parent directories and writes the current delegate's TOSA bytes, replacing an existing file. Also forces serial backend preprocessing to avoid dump collisions. Unset/empty disables this dump. |
 | `RETAB_PARALLEL_BACKEND_PREPROCESS_WORKERS` | `ARM_TOSA_ENGINE_PARALLEL_BACKEND_PREPROCESS_WORKERS` | `preprocess.py`: `_parallel_backend_preprocess_workers`, called during installation and job scheduling | Integer worker count, default `0`. Negative and invalid values become `0`; invalid values log a warning. Values above `1` enable the experimental fork-based multi-delegate path. Debug artifacts and unavailable fork multiprocessing still cause serial execution. |
-| `RETAB_FORCE_CF_RECURSIVE_PASSES` | `ARM_TOSA_ENGINE_FORCE_CF_RECURSIVE_PASSES` | `preprocess.py`: `_run_control_flow_submodule_rust_passes` | Exactly `1` runs the full parent pass entry point on each immediate control-flow submodule before the normal named cond/while pipelines. Unset otherwise. This looks like a stale debug path; see the audit notes below. |
 
 [integration/executorch_arm.py](../python/retab/integration/executorch_arm.py)
 also reads, sets, and restores `RETAB_PARALLEL_BACKEND_PREPROCESS_WORKERS`
@@ -71,13 +70,4 @@ select the interpreter, rather than by RETAB's own source.
 `RETAB_ROOT` and `VENV` in documentation are caller-chosen path placeholders,
 not environment configuration read by the package.
 
-## Settings that need a separate audit
-
-- `RETAB_FORCE_CF_RECURSIVE_PASSES` and its alias are live reads but look
-  stale. The normal path already runs named cond/while pipelines, and its
-  extra `run_fx_passes` call replaces the parent `STASHED_IR` hierarchy
-  before serialization. Keep this legacy debug setting unset pending a
-  control-flow audit.
-
-The Rust configuration helpers all have active call sites. This inventory
-does not remove or change any runtime switch.
+The Rust configuration helpers all have active call sites.
