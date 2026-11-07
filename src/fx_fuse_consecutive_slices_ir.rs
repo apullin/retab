@@ -26,12 +26,7 @@ pub(crate) fn static_slice(graph: &IrGraph, id: NodeId) -> Option<StaticSlice> {
     {
         return None;
     }
-    // SizeAdjustInput's intermediate slices retain the original input metadata.
-    let mut size = if let Some(slice) = static_slice(graph, input) {
-        graph.shape_in_node_order(id, input, &slice.size)?
-    } else {
-        graph.logical_input_shape(id, input)?
-    };
+    let mut size = graph.node_shape_vec(input)?;
     let dim = normalize_dim(node.arg_int(1)?, size.len())?;
     let dim_size = size[dim];
     if size.iter().any(|&dim| dim <= 0) {
@@ -79,10 +74,6 @@ impl IrPass for IrFuseConsecutiveSlicesPass {
                     None
                 };
                 let Some((input, first_start)) = first else {
-                    break;
-                };
-                let Some(first_start) = graph.shape_in_node_order(id, second.input, &first_start)
-                else {
                     break;
                 };
                 if first_start.len() != second.start.len()

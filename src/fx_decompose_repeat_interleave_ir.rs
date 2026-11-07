@@ -2,8 +2,8 @@
 //!
 //! Decomposes `repeat_interleave.self_int(x, repeats, dim)` into:
 //!   1. unsqueeze_copy(x, dim + 1)
-//!   2. repeat(unsqueezed, multiples)  — multiples[dim+1] = repeats
-//!   3. view_copy(repeated, final_shape) — final_shape[dim] *= repeats
+//!   2. repeat(unsqueezed, multiples)  — `multiples[dim+1] = repeats`
+//!   3. view_copy(repeated, final_shape) — `final_shape[dim] *= repeats`
 
 use crate::fx_ir::{i64_list_arg as i64_list, normalize_dim, IrArg, IrGraph, IrPass};
 use crate::fx_target::is_repeat_interleave_self_int_target;

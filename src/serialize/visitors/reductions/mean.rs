@@ -13,8 +13,8 @@ pub(in crate::serialize::visitors) fn emit_aten_mean(ctx: &EmitContext) -> EmitR
     let mut result = EmitResult::default();
 
     let mut reduce_count: f64 = 1.0;
-    for axis in &spec.axes {
-        if let Some(&dim_size) = spec.input_shape.get(axis.tosa_axis as usize) {
+    for reduced in &spec.axes {
+        if let Some(&dim_size) = spec.input_shape.get(reduced.axis as usize) {
             reduce_count *= dim_size as f64;
         }
     }
@@ -63,7 +63,7 @@ pub(in crate::serialize::visitors) fn emit_aten_mean(ctx: &EmitContext) -> EmitR
         current_shape,
         base_dtype,
         Op::ReduceSum,
-        |tosa_axis| Attribute::ReduceSum(ReduceSumAttribute { axis: tosa_axis }),
+        |axis| Attribute::ReduceSum(ReduceSumAttribute { axis }),
         "reduce_sum_axis",
         sum_name.clone(),
         true, // final_on_last: always use sum_name on last iteration

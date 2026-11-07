@@ -338,6 +338,32 @@ def test_argmax_without_dim_tosa_INT():
         _all_rust_preprocess(program, TosaCompileSpec("TOSA-1.0+INT"))
 
 
+def _main_block_ops(tosa: bytes) -> list[int]:
+    block = TosaGraph.TosaGraph.GetRootAs(bytearray(tosa), 0).Regions(0).Blocks(0)
+    return [block.Operators(i).Op() for i in range(block.OperatorsLength())]
+
+
+def test_conv_becomes_a_channels_last_conv2d_tosa_INT():
+    """RETAB builds rc4's pipeline: the conv becomes a channels-last TOSA CONV2D on a
+    pre-permuted weight between explicit TRANSPOSEs, so nothing reaches the serializer's
+    aten-conv guard (P2 design X5) and the graph stays with RETAB."""
+    from retab import _native
+    from retab import preprocess as rp
+
+    # Frozen parameters, as a lowered program has them: the importer reads the weight's
+    # data, which IrRewriteConv pre-permutes.
+    module = torch.nn.Sequential(torch.nn.Conv2d(2, 4, 3), torch.nn.ReLU()).requires_grad_(False)
+    program = torch.export.export(module, (torch.ones(1, 2, 8, 8),)).run_decompositions()
+    config = rp._build_pipeline_config(TosaCompileSpec("TOSA-1.0+INT"))
+    _native.run_fx_passes(program.graph_module, program, pipeline_config=config)
+    ops = _main_block_ops(_native.ingest_and_serialize())
+    assert ops.count(Op.Op.CONV2D) == 1
+    # The input permute to NHWC and the output permute back; the weight is a constant.
+    assert ops.count(Op.Op.TRANSPOSE) == 2
+    conv = ops.index(Op.Op.CONV2D)
+    assert ops.index(Op.Op.TRANSPOSE) < conv < len(ops) - 1 - ops[::-1].index(Op.Op.TRANSPOSE)
+
+
 class CopyOverUnusedInput(torch.nn.Module):
     def forward(self, x, y):
         return y.clone().copy_(x) + x

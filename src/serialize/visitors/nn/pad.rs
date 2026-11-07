@@ -64,22 +64,8 @@ pub(in crate::serialize::visitors) fn emit_pad(ctx: &EmitContext) -> EmitResult 
         }
     }
 
-    let dim_order = node.meta.tosa_dim_order.as_ref();
-    let reordered_pad = if let Some(order) = dim_order {
-        if order.len() == rank {
-            order
-                .iter()
-                .map(|&idx| per_dim_pad.get(idx as usize).copied().unwrap_or((0, 0)))
-                .collect()
-        } else {
-            per_dim_pad.clone()
-        }
-    } else {
-        per_dim_pad.clone()
-    };
-
     let mut output_shape = input_shape.clone();
-    for (i, (before, after)) in reordered_pad.iter().enumerate() {
+    for (i, (before, after)) in per_dim_pad.iter().enumerate() {
         if let Some(slot) = output_shape.get_mut(i) {
             *slot += before + after;
         }
@@ -92,7 +78,7 @@ pub(in crate::serialize::visitors) fn emit_pad(ctx: &EmitContext) -> EmitResult 
     ));
 
     let mut pad_shape = Vec::with_capacity(rank * 2);
-    for (before, after) in &reordered_pad {
+    for (before, after) in &per_dim_pad {
         pad_shape.push(*before);
         pad_shape.push(*after);
     }

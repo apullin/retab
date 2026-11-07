@@ -170,11 +170,13 @@ retab/
 ├── src/
 │   ├── lib.rs                   # PyO3 entry points and stashed IR hierarchy
 │   ├── fx_ir.rs                 # Mutable rewrite graph and pass runner
-│   ├── fx_meta.rs               # Tensor, quantization, and layout metadata
+│   ├── fx_meta.rs               # Tensor (value, dim order), quantization and passthrough metadata
 │   ├── fx_pipeline.rs           # Ordered parent and submodule pipelines
 │   ├── fx_*_ir.rs               # Rust graph transformation passes
+│   ├── layout/                  # rc4's layout model: permute/view passes and rewrites
 │   ├── control_flow/            # Region assembly and boundary contracts
 │   ├── ingest/                  # Rewrite IR to serializer graph conversion
+│   ├── graph/                   # Serializer graph (slotmap) and typed OpTarget
 │   └── serialize/               # TOSA visitors and flatbuffer assembly
 ├── python/retab/
 │   ├── integration/             # Stable ExecuTorch install/activation API

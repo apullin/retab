@@ -128,7 +128,7 @@ def test_main_and_nested_regions_receive_the_same_pipeline_config(monkeypatch, r
     calls = []
 
     def record(kind):
-        def run(gm, ep, region_name=None, *, pipeline_config):
+        def run(gm, ep, region_name=None, *, pipeline_config, u55_transpose_probe=None):
             calls.append((kind, gm, ep, region_name, pipeline_config))
 
         return run
@@ -142,7 +142,7 @@ def test_main_and_nested_regions_receive_the_same_pipeline_config(monkeypatch, r
     assert result.processed_bytes == b"tosa"
     assert calls[0][:4] == ("run_fx_passes", program.graph_module, program, None)
     config = calls[0][4]
-    assert config == {**rp._build_pipeline_config(compile_spec), "u55_split_permutes": []}
+    assert config == rp._build_pipeline_config(compile_spec)
     assert all(call[2] is program and call[4] is config for call in calls)
     assert [(kind, region) for kind, _, _, region, _ in calls if region is not None] == [
         ("run_fx_cond_passes", "true_graph"),
@@ -150,3 +150,31 @@ def test_main_and_nested_regions_receive_the_same_pipeline_config(monkeypatch, r
         ("run_fx_cond_passes", "true_graph__body_graph__true_graph"),
     ]
     assert sum(call[0] == "run_fx_passes" for call in calls) == (4 if recursive else 1)
+
+
+def test_u55_split_gets_rc4s_exact_check(monkeypatch):
+    """On U55 run_fx_passes gets rc4's exact TRANSPOSE check, which the U55 split asks
+    about the permutes alive at its slot; off U55 it gets none (APU-160). The check runs
+    Vela in a lowering context: a batch-1 NCHW-to-NHWC transpose of a 320x320 image
+    passes, which rc4's check called outside one would reject."""
+    from executorch.backends.arm.tosa.compile_spec import TosaCompileSpec
+
+    monkeypatch.setattr(rp, "stock_fallback_reason", lambda ep, spec: None)
+    calls = []
+
+    def run(gm, ep, *, pipeline_config, u55_transpose_probe=None):
+        calls.append(u55_transpose_probe)
+
+    monkeypatch.setattr(_native, "run_fx_passes", run)
+    monkeypatch.setattr(_native, "ingest_and_serialize", lambda: b"tosa")
+    program = torch.export.export(torch.nn.ReLU(), (torch.ones(2),))
+    for spec in ["TOSA-1.0+INT+int16+int4+u55", "TOSA-1.0+INT+int16+int4+cf"]:
+        rp._all_rust_preprocess(program, TosaCompileSpec(spec))
+
+    probe, u85_probe = calls
+    assert u85_probe is None and probe is not None
+    pytest.importorskip("ethosu.vela")
+    assert probe([2, 2, 257, 257], [0, 2, 3, 1], "torch.int8") is True
+    assert probe([1, 3, 320, 320], [0, 2, 3, 1], "torch.int8") is False
+    assert probe([1, 3, 320, 320], [0, 2, 3, 1], "torch.int32") is True
+    assert probe([1, 3, 320, 320], [0, 2, 3, 1], "") is True

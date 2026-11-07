@@ -2,11 +2,15 @@
 //! (executorch master, backends/arm/_passes/normalize_index_put_bool_index_tensor_pass.py).
 //!
 //! The simple boolean-mask scatter `x[mask] = scalar`, i.e.
-//!   index_put(destination, [mask], data, accumulate=False)
-//! with a single bool mask and scalar data, lowers directly to a `where`:
-//!   mask = view_copy(mask, mask_shape right-padded with 1s to destination rank)
-//!   data = view_copy(data, [1]*destination_rank)
-//!   out  = where(mask, data, destination)
+//! `index_put(destination, [mask], data, accumulate=False)` with a single bool mask
+//! and scalar data, lowers directly to a `where`:
+//!
+//! ```text
+//! mask = view_copy(mask, mask_shape right-padded with 1s to destination rank)
+//! data = view_copy(data, [1]*destination_rank)
+//! out  = where(mask, data, destination)
+//! ```
+//!
 //! Runs before IrRewriteIndexPut so the general SCATTER path only sees int indices.
 
 use crate::fx_index_domain::{

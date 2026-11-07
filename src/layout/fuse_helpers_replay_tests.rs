@@ -1,0 +1,299 @@
+//! rc4 replays of FuseDuplicateUsers, FuseIdenticalInputTransforms and
+//! MoveDataMovementOpsToSmallerDtype (APU-160). Every case of each fixture in
+//! tests/fixtures/layout_replay must match what the real rc4 pass did,
+//! including the `modified` flag, which the propagation driver loops on, and
+//! the dead nodes; see `replay` for what else is compared.
+//!
+//! FuseDuplicateUsers is replayed at its three table stages: alone
+//! (`arm_pass_manager.py:587`), after InsertTableOpsPass (the propagation
+//! driver) and after FuseEqualPlaceholdersPass too (`:765`).
+
+use crate::fx_ir::{IrGraph, IrPass};
+use crate::layout::ctx::LayoutCtx;
+use crate::layout::fuse_duplicate_users::{
+    fuse_duplicate_users, IrFuseDuplicateUsersPass, TableStage, TOSA_EXCLUDED_TARGETS,
+};
+use crate::layout::fuse_identical_input_transforms::{
+    fuse_identical_input_transforms, FuseIdenticalInputTransforms, IrFuseIdenticalInputTransformsPass,
+};
+use crate::layout::move_data_movement::IrMoveDataMovementOpsToSmallerDtypePass;
+use crate::layout::replay::{self, Options};
+
+const FUSE_DUPLICATE_USERS: &str =
+    include_str!("../../tests/fixtures/layout_replay/fuse_duplicate_users.txt");
+const FUSE_DUPLICATE_USERS_DRIVER: &str =
+    include_str!("../../tests/fixtures/layout_replay/fuse_duplicate_users_driver.txt");
+const FUSE_DUPLICATE_USERS_LATE: &str =
+    include_str!("../../tests/fixtures/layout_replay/fuse_duplicate_users_late.txt");
+const FUSE_IDENTICAL_INPUT_TRANSFORMS: &str =
+    include_str!("../../tests/fixtures/layout_replay/fuse_identical_input_transforms.txt");
+const FUSE_IDENTICAL_INPUT_TRANSFORMS_DRIVER: &str =
+    include_str!("../../tests/fixtures/layout_replay/fuse_identical_input_transforms_driver.txt");
+const MOVE_DATA_MOVEMENT: &str =
+    include_str!("../../tests/fixtures/layout_replay/move_data_movement_ops_to_smaller_dtype.txt");
+
+/// The default comparison plus the `modified` flag and dead nodes: rc4's
+/// FuseIdenticalInputTransforms removes dead code only when it changed
+/// something, and the other two leave it, which the ports must match.
+const WITH_FLAG: Options = Options {
+    dim_orders: replay::DimOrders::Ignore,
+    dead_nodes: true,
+    float32_activations: false,
+    modified: true,
+};
+
+/// rc4 fuses two users that share one NaN float object (`math.nan`, or one
+/// `float("nan")` passed twice): Python compares the object to itself before
+/// calling `==`. RETAB's IR has no object identity, so the port never fuses
+/// on a NaN argument; separate NaN objects match (`separate_nan_scalars_never_fuse`).
+const SHARED_NAN_OBJECT: &str = "rc4 fuses users that share one NaN float object, which the IR can't tell apart from two";
+
+#[test]
+fn fuse_duplicate_users_matches_rc4() {
+    replay::check_known_with(
+        &IrFuseDuplicateUsersPass::EARLY,
+        FUSE_DUPLICATE_USERS,
+        &[("one_shared_nan_object_fuses", SHARED_NAN_OBJECT)],
+        WITH_FLAG,
+    );
+}
+
+/// The propagation driver's `fuse_horizontal`
+/// (backends/transforms/propagate_view_copy_permute_pass.py:569-576) at phase
+/// 6, after InsertTableOpsPass: `fuse_duplicate_users` on a `LayoutCtx` at
+/// [`TableStage::OwnTableConstants`].
+struct DriverFuseDuplicateUsers;
+
+impl IrPass for DriverFuseDuplicateUsers {
+    fn name(&self) -> &str {
+        "DriverFuseDuplicateUsers"
+    }
+
+    fn run(&self, graph: &mut IrGraph) -> bool {
+        let mut ctx = LayoutCtx::new(graph);
+        let modified = fuse_duplicate_users(&mut ctx, TOSA_EXCLUDED_TARGETS, TableStage::OwnTableConstants);
+        if modified {
+            ctx.finish();
+        }
+        modified
+    }
+}
+
+/// rc4 fuses two 16-bit TABLEs with equal tables at `:765` and keeps one
+/// RESCALE per original; the port keeps both pending tables (see
+/// `layout::fuse_duplicate_users`), so only `modified` differs.
+const SIXTEEN_BIT_TABLES: &str =
+    "rc4 fuses 16-bit TABLEs and keeps each RESCALE, which a pending table can't express; the port keeps both";
+
+#[test]
+fn fuse_duplicate_users_in_the_driver_matches_rc4() {
+    replay::check_known_with(&DriverFuseDuplicateUsers, FUSE_DUPLICATE_USERS_DRIVER, &[], WITH_FLAG);
+}
+
+#[test]
+fn late_fuse_duplicate_users_matches_rc4() {
+    replay::check_known_with(
+        &IrFuseDuplicateUsersPass::LATE,
+        FUSE_DUPLICATE_USERS_LATE,
+        &[("int16_tables_keep_one_rescale_each", SIXTEEN_BIT_TABLES)],
+        WITH_FLAG,
+    );
+}
+
+#[test]
+fn fuse_identical_input_transforms_matches_rc4() {
+    replay::check_known_with(
+        &IrFuseIdenticalInputTransformsPass,
+        FUSE_IDENTICAL_INPUT_TRANSFORMS,
+        &[],
+        WITH_FLAG,
+    );
+}
+
+/// The propagation driver's entry point:
+/// `FuseIdenticalInputTransformsPass(permute_targets=...).call(graph_module)`
+/// (backends/transforms/propagate_view_copy_permute_pass.py:921-928), with no
+/// exported program and no `ArmOpTargetedPass` gate, on a `LayoutCtx`.
+struct DriverFuseIdenticalInputTransforms;
+
+impl IrPass for DriverFuseIdenticalInputTransforms {
+    fn name(&self) -> &str {
+        "DriverFuseIdenticalInputTransforms"
+    }
+
+    fn run(&self, graph: &mut IrGraph) -> bool {
+        let mut ctx = LayoutCtx::new(graph);
+        let modified = fuse_identical_input_transforms(&mut ctx, &FuseIdenticalInputTransforms::DRIVER);
+        if modified {
+            ctx.finish();
+        }
+        modified
+    }
+}
+
+#[test]
+fn fuse_identical_input_transforms_driver_entry_matches_rc4() {
+    replay::check_known_with(
+        &DriverFuseIdenticalInputTransforms,
+        FUSE_IDENTICAL_INPUT_TRANSFORMS_DRIVER,
+        &[],
+        WITH_FLAG,
+    );
+}
+
+/// rc4's retrace fake-executes `flip` on the rewired, permuted value; the
+/// port has no local shape rule for it and fails rather than keep a stale
+/// value (`move_data_movement::rederived_facts`).
+const NO_SHAPE_RULE: &str = "the port has no local rule for a node whose operands rc4 changed, and fails instead";
+
+#[test]
+fn move_data_movement_ops_to_smaller_dtype_matches_rc4() {
+    replay::check_known_with(
+        &IrMoveDataMovementOpsToSmallerDtypePass,
+        MOVE_DATA_MOVEMENT,
+        &[("a_rewired_user_without_a_shape_rule", NO_SHAPE_RULE)],
+        WITH_FLAG,
+    );
+}
+
+/// rc4's message for each raising case: the `# rc4: ...` comment the
+/// generator writes after `after raises=`, which `replay::parse` skips.
+fn rc4_messages(fixture: &str) -> std::collections::HashMap<String, String> {
+    let mut messages = std::collections::HashMap::new();
+    let mut case = None;
+    for line in fixture.lines() {
+        if let Some(name) = line.strip_prefix("case ") {
+            case = Some(name.to_string());
+        } else if let Some(message) = line.strip_prefix("# rc4: ") {
+            messages.insert(case.clone().expect("a message inside a case"), message.to_string());
+        }
+    }
+    messages
+}
+
+/// Where rc4's MoveDataMovementOpsToSmallerDtype raises, it is its closing
+/// `graph.lint()` rejecting a RESCALE user that now comes before the
+/// RESCALE, or its retrace's fake execution rejecting a rewired user's
+/// operands; the port panics for the same reason.
+#[test]
+fn move_data_movement_fails_like_rc4_for_the_same_reason() {
+    let cases = replay::parse(MOVE_DATA_MOVEMENT).unwrap();
+    let messages = rc4_messages(MOVE_DATA_MOVEMENT);
+    let raising: Vec<&replay::Case> = cases.iter().filter(|case| case.raises.is_some()).collect();
+    let lint = |message: &str| message.contains("used before it has been defined");
+    let lint_cases = raising.iter().filter(|case| lint(&messages[&case.name])).count();
+    assert!(lint_cases >= 10, "{lint_cases} cases where rc4's lint raises");
+    assert!(raising.len() - lint_cases >= 10, "{} cases where rc4's retrace raises", raising.len() - lint_cases);
+    for case in raising {
+        assert_eq!(case.raises.as_deref(), Some("RuntimeError"), "{}", case.name);
+        let rc4 = &messages[&case.name];
+        let mut graph = replay::import(case);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            IrMoveDataMovementOpsToSmallerDtypePass.run(&mut graph)
+        }))
+        .expect_err("the port panics where rc4 raises");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        let expected = if lint(rc4) {
+            "used before it has been defined"
+        } else {
+            assert!(rc4.contains("broadcast"), "{}: rc4 raised {rc4}", case.name);
+            "rc4's retrace raises here: incompatible operands"
+        };
+        assert!(message.contains(expected), "{}: rc4 raised {rc4}; the port panicked with {message}", case.name);
+    }
+}
+
+/// Each fixture holds the structured cases plus at least 300 accepted random
+/// cases, and enough of them rewrite the graph to exercise the pass.
+#[test]
+fn fixtures_cover_their_passes() {
+    for (fixture, minimum_random, minimum_modified) in [
+        (FUSE_DUPLICATE_USERS, 300, 200),
+        (FUSE_DUPLICATE_USERS_DRIVER, 300, 150),
+        (FUSE_DUPLICATE_USERS_LATE, 300, 200),
+        (FUSE_IDENTICAL_INPUT_TRANSFORMS, 300, 120),
+        (MOVE_DATA_MOVEMENT, 300, 150),
+    ] {
+        let cases = replay::parse(fixture).unwrap();
+        let random = cases.iter().filter(|case| case.name.starts_with("random_")).count();
+        let modified = cases.iter().filter(|case| case.modified).count();
+        assert!(random >= minimum_random, "{random} random cases");
+        assert!(modified >= minimum_modified, "{modified} modified cases");
+    }
+    let driver = replay::parse(FUSE_IDENTICAL_INPUT_TRANSFORMS_DRIVER).unwrap();
+    assert!(driver.iter().filter(|case| case.modified).count() > 20);
+}
+
+/// Statistics for the notes; with RETAB_REPLAY_DIR set, replays fixtures
+/// written there instead (a larger fuzzing run, say):
+///
+/// ```text
+/// cd /tmp && <venv>/bin/python -P <retab>/tests/fixtures/layout_replay/gen_layout_replay.py \
+///     --pass fuse_duplicate_users --random 3000 --seed 7 --out /tmp/replay
+/// RETAB_REPLAY_DIR=/tmp/replay cargo test --lib fuse_helpers_replay_report -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "diagnostic: prints replay statistics; run with --ignored --nocapture"]
+fn fuse_helpers_replay_report() {
+    let passes: [(&dyn IrPass, &str, &str); 6] = [
+        (&IrFuseDuplicateUsersPass::EARLY, "fuse_duplicate_users.txt", FUSE_DUPLICATE_USERS),
+        (
+            &DriverFuseDuplicateUsers,
+            "fuse_duplicate_users_driver.txt",
+            FUSE_DUPLICATE_USERS_DRIVER,
+        ),
+        (
+            &IrFuseDuplicateUsersPass::LATE,
+            "fuse_duplicate_users_late.txt",
+            FUSE_DUPLICATE_USERS_LATE,
+        ),
+        (
+            &IrFuseIdenticalInputTransformsPass,
+            "fuse_identical_input_transforms.txt",
+            FUSE_IDENTICAL_INPUT_TRANSFORMS,
+        ),
+        (
+            &DriverFuseIdenticalInputTransforms,
+            "fuse_identical_input_transforms_driver.txt",
+            FUSE_IDENTICAL_INPUT_TRANSFORMS_DRIVER,
+        ),
+        (
+            &IrMoveDataMovementOpsToSmallerDtypePass,
+            "move_data_movement_ops_to_smaller_dtype.txt",
+            MOVE_DATA_MOVEMENT,
+        ),
+    ];
+    let dir = std::env::var("RETAB_REPLAY_DIR").ok();
+    for (pass, file, committed) in passes {
+        let text = match &dir {
+            Some(dir) => match std::fs::read_to_string(std::path::Path::new(dir).join(file)) {
+                Ok(text) => text,
+                Err(error) => {
+                    println!("{file}: skipped, {error}");
+                    continue;
+                }
+            },
+            None => committed.to_string(),
+        };
+        let results = replay::replay(pass, &text, WITH_FLAG);
+        let matched = results.iter().filter(|result| result.mismatch.is_none()).count();
+        let raises = replay::parse(&text)
+            .unwrap()
+            .iter()
+            .filter(|case| case.raises.is_some())
+            .count();
+        println!(
+            "{} ({file}): {matched}/{} match, {raises} where rc4 raises; mismatches: {}",
+            pass.name(),
+            results.len(),
+            replay::class_counts(results.iter())
+        );
+        for result in results.iter().filter(|result| result.mismatch.is_some()).take(3) {
+            println!("{}", result.report);
+        }
+    }
+}

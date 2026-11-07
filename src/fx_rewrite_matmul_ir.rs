@@ -1,4 +1,23 @@
+//! Pure Rust IrPass: rescale a quantized `aten.mm`/`aten.bmm` product to its
+//! output quantization, as rc4's RewriteMatmulPass does when it retargets a
+//! bmm to TOSA MATMUL (`backends/arm/_passes/rewrite_matmul.py:39-100`).
+//!
+//! RETAB keeps the aten target, which the serializer lowers to MATMUL, so the
+//! rescaled node is RETAB's MATMUL. The pass also writes MATMUL's dtype into its
+//! val (APU-135 P2): int32 for int8 and int16 inputs, from rc4's fake kernel
+//! (`backends/arm/tosa/dialect/ops/matmul.py:28-76`), and marks an int16 product
+//! INT48, as rc4 marks its MATMUL (`rewrite_matmul.py:102-104`). The layout passes
+//! read that mark: a RESCALE of INT48 data is not elementwise, so no view crosses
+//! it onto the packed INT48 accumulator, and no permute moves over it
+//! (`TosaPropagationOverrides`, APU-135 P3).
+//! Otherwise RETAB leaves a quantized compute node's val in float32 (design
+//! F2). `layout::dtype::value_dtype` reads that val, so the layout passes see an
+//! int32 accumulator before the RESCALE, as rc4's
+//! MoveDataMovementOpsToSmallerDtypePass does. Ingest types the accumulator
+//! int32 too (`is_accumulator_op`, `ingest/finalize.rs`).
+
 use crate::fx_ir::{IrGraph, IrPass, NodeId, NodeOp, RescaleRewrite};
+use crate::layout::dtype;
 use crate::runner_logging::log_line;
 
 fn insert_matmul_rescale(graph: &mut IrGraph, matmul_id: NodeId) -> bool {
@@ -34,9 +53,21 @@ fn insert_matmul_rescale(graph: &mut IrGraph, matmul_id: NodeId) -> bool {
             rescale_meta,
         ))
     };
+    let input = dtype::operand_dtype(graph, matmul_id, 0);
+    let accumulator = input.as_deref().and_then(dtype::matmul_output_dtype);
+    if let Some(accumulator) = accumulator {
+        let meta = &mut graph.node_mut(matmul_id).meta;
+        meta.set_val_dtype_for_existing_shape(accumulator);
+        // rc4 rescales an int32 product to an int8 or int16 output, and marks
+        // the MATMUL INT48 when its first input is int16.
+        if input.as_deref() == Some("torch.int16") && accumulator == "torch.int32" {
+            dtype::set_special_dtype(meta, dtype::SpecialDtype::Int48);
+        }
+    }
     graph.replace_live_uses_except(matmul_id, rescale, rescale)
 }
 
+/// See the module docs.
 pub struct IrRewriteMatmulRescalePass;
 
 impl IrPass for IrRewriteMatmulRescalePass {
@@ -126,5 +157,59 @@ mod tests {
         );
 
         assert!(!IrRewriteMatmulRescalePass.run(&mut graph));
+    }
+
+    /// A quantized `aten.bmm` as RETAB's IR holds it after IrFoldQdq: a
+    /// float32 val with integer maps (design F2; RETAB_DEBUG_NODE on a
+    /// quantized `torch.bmm` for TOSA-1.0+INT shows `dtype=torch.float32
+    /// out_qparam=(.., int8)` before and after this pass).
+    fn quantized_bmm(graph: &mut IrGraph, dtype: &str) -> NodeId {
+        let a = placeholder(graph, "a", [1, 4, 8], dtype);
+        let b = placeholder(graph, "b", [1, 8, 3], dtype);
+        let mut meta = NodeMeta::tensor([1, 4, 3], "torch.float32");
+        meta.set_binary_input_output_qparams(
+            qparam(0.1, 0, dtype),
+            qparam(0.2, 0, dtype),
+            qparam(0.3, 4, dtype),
+        );
+        let bmm = call_with_meta(
+            graph,
+            "bmm",
+            "aten.bmm.default",
+            vec![IrArg::Node(a), IrArg::Node(b)],
+            meta,
+        );
+        output(graph, bmm);
+        bmm
+    }
+
+    /// rc4's RewriteMatmulPass in .venv-et16, on a quantized `torch.bmm`:
+    /// `tosa_matmul_default :: int32[1, 4, 3] iq {0:int8,1:int8} oq {0:int8}`
+    /// for TOSA-1.0+INT and `int32[1, 4, 3] iq {0:int16,1:int16} oq {0:int16}`
+    /// with A16 on +int16, each followed by a RESCALE to the output dtype.
+    /// RETAB gives its accumulator that dtype and keeps its maps.
+    #[test]
+    fn gives_the_rescaled_accumulator_rc4s_matmul_dtype() {
+        for dtype in ["torch.int8", "torch.int16"] {
+            let mut graph = IrGraph::empty();
+            let bmm = quantized_bmm(&mut graph, dtype);
+            assert!(IrRewriteMatmulRescalePass.run(&mut graph));
+            let meta = &graph.node(bmm).meta;
+            assert_eq!(meta.val_dtype(), Some("torch.int32"), "{dtype}");
+            assert_eq!(meta.val_shape(), Some(&[1, 4, 3][..]));
+            assert_eq!(
+                meta.output_qparam().map(|qparam| qparam.dtype_str.as_str()),
+                Some(dtype)
+            );
+            let rescale = graph.by_name("bmm_output_rescale").unwrap();
+            assert_eq!(rescale.meta.val_dtype(), Some(dtype));
+            // rc4 marks an int16 MATMUL INT48 (rewrite_matmul.py:102-104).
+            let int48 = dtype == "torch.int16";
+            assert_eq!(
+                meta.extra_str(crate::layout::dtype::SPECIAL_DTYPE_KEY),
+                int48.then_some("INT48"),
+                "{dtype}"
+            );
+        }
     }
 }

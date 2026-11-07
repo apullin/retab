@@ -4,6 +4,11 @@
 //!   slice_copy(input) + slice_copy(weight) + slice_copy(bias)
 //!   convolution/conv2d(groups=1) per group
 //!   cat(outputs, dim=1)
+//!
+//! A depthwise convolution stays grouped for DEPTHWISE_CONV2D. A rank-5 one is
+//! split too (APU-135 P2; design §4.2-P), as rc4's DecomposeGroupedConvPass
+//! splits it, since TOSA has no DEPTHWISE_CONV3D
+//! (`backends/arm/_passes/decompose_grouped_conv_pass.py:258-263`).
 
 use crate::fx_conv_args::{ConvArgKind, ConvArgs};
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
@@ -160,8 +165,12 @@ fn parse_grouped_conv(graph: &IrGraph, id: NodeId) -> Option<ConvArgs> {
     if spec.groups <= 1 {
         return None;
     }
-    let in_channels = graph.node_shape(spec.input)?.get(1).copied().unwrap_or(0);
-    if !spec.transposed && in_channels == spec.groups {
+    let input_shape = graph.node_shape(spec.input)?;
+    let in_channels = input_shape.get(1).copied().unwrap_or(0);
+    // `_is_depthwise_conv` (`decompose_grouped_conv_pass.py:91-92`); see the
+    // module docs for rank 5.
+    let depthwise = !spec.transposed && in_channels == spec.groups;
+    if depthwise && input_shape.len() != 5 {
         return None;
     }
 
@@ -299,6 +308,7 @@ fn decompose_grouped_conv(graph: &mut IrGraph, id: NodeId, spec: ConvArgs) -> bo
     true
 }
 
+/// See the module docs.
 pub struct IrDecomposeGroupedConvPass;
 
 impl IrPass for IrDecomposeGroupedConvPass {
@@ -408,6 +418,8 @@ mod tests {
         assert_eq!(qparams[&2].per_channel_scales, vec![1.1, 1.2, 1.3, 1.4]);
     }
 
+    /// A rank-4 depthwise conv stays grouped for DEPTHWISE_CONV2D, as rc4 keeps
+    /// it (`Conv2d(2, 2, 1, groups=2)` stays grouped in .venv-et16).
     #[test]
     fn skips_depthwise_conv() {
         let mut graph = IrGraph::empty();
@@ -423,5 +435,62 @@ mod tests {
         );
 
         assert!(!IrDecomposeGroupedConvPass.run(&mut graph));
+    }
+
+    /// A depthwise `Conv3d(2, 2, 1, groups=2)` on `[1, 2, 3, 4, 4]`.
+    fn rank5_depthwise_conv(graph: &mut IrGraph) -> NodeId {
+        let input = placeholder(graph, "input", [1, 2, 3, 4, 4], "torch.int8");
+        let weight = placeholder(graph, "weight", [2, 1, 1, 1, 1], "torch.int8");
+        let conv = call_with_meta(
+            graph,
+            "conv",
+            "aten.convolution.default",
+            vec![
+                IrArg::Node(input),
+                IrArg::Node(weight),
+                IrArg::None,
+                i64_list(&[1, 1, 1]),
+                i64_list(&[0, 0, 0]),
+                i64_list(&[1, 1, 1]),
+                IrArg::Bool(false),
+                i64_list(&[0, 0, 0]),
+                IrArg::Int(2),
+            ],
+            NodeMeta::tensor([1, 2, 3, 4, 4], "torch.int8"),
+        );
+        output(graph, conv);
+        conv
+    }
+
+    /// Design §4.2-P, part of step S5: rc4 keeps rank-4 depthwise convs for
+    /// RewriteConvPass but decomposes rank-5 ones, as TOSA has no
+    /// DEPTHWISE_CONV3D (`decompose_grouped_conv_pass.py:258-263`). rc4's
+    /// DecomposeGroupedConvPass, run in .venv-et16, turns `Conv3d(2, 2, 1,
+    /// groups=2)` on `[1, 2, 3, 4, 4]` into two groups=1 convolutions on
+    /// `[1, 1, 3, 4, 4]` with `[1, 1, 1, 1, 1]` weights. RETAB does the same, so
+    /// its IrRewriteConv never meets CONV3D with groups != 1 (RCP:147-158).
+    #[test]
+    fn decomposes_rank5_depthwise_conv_like_rc4() {
+        let mut graph = IrGraph::empty();
+        let conv = rank5_depthwise_conv(&mut graph);
+        assert!(IrDecomposeGroupedConvPass.run(&mut graph));
+        assert!(!graph.nodes[conv].alive);
+        let groups: Vec<_> = graph
+            .live_nodes()
+            .filter(|node| node.target == "aten.convolution.default")
+            .map(|node| {
+                (
+                    node.arg_int(8),
+                    graph.node_shape_vec(node.arg_node(0).unwrap()),
+                    graph.node_shape_vec(node.arg_node(1).unwrap()),
+                )
+            })
+            .collect();
+        let group = (
+            Some(1),
+            Some(vec![1, 1, 3, 4, 4]),
+            Some(vec![1, 1, 1, 1, 1]),
+        );
+        assert_eq!(groups, [group.clone(), group]);
     }
 }

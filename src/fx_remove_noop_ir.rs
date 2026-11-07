@@ -4,8 +4,8 @@
 //! _to_dim_order_copy, _to_copy, alias_copy, copy, and detach_copy where
 //! input and output dtypes match.
 //!
-//! For `aten.copy.default`, cast and broadcast args[1] (the source) to the
-//! destination's dtype and shape. For all others, args[0] is the pass-through
+//! For `aten.copy.default`, cast and broadcast `args[1]` (the source) to the
+//! destination's dtype and shape. For all others, `args[0]` is the pass-through
 //! value.
 
 use crate::fx_fuse_consecutive_slices_ir::static_slice;
@@ -112,16 +112,6 @@ fn is_identity_view(graph: &IrGraph, id: NodeId, input: NodeId) -> bool {
     };
     if graph.node_shape(id) != Some(input_shape) {
         return false;
-    }
-    if let Some((input_order, output_order)) = graph
-        .node(input)
-        .meta
-        .tosa_dim_order()
-        .zip(node.meta.tosa_dim_order())
-    {
-        if input_order != output_order {
-            return false;
-        }
     }
     let Some(mut shape) = node.arg(1).and_then(|arg| graph.constant_shape(arg)) else {
         return false;
@@ -240,7 +230,7 @@ impl IrPass for IrRemoveNoopPass {
                     _ => false,
                 };
                 let full_slice = static_slice(graph, id).is_some_and(|slice| {
-                    graph.logical_input_shape(id, input).is_some_and(|shape| {
+                    graph.node_shape_vec(input).is_some_and(|shape| {
                         slice.start.len() == shape.len()
                             && slice.start.iter().all(|&start| start == 0)
                             && slice.size == shape
@@ -975,46 +965,5 @@ mod tests {
         let cast = graph.node(view).arg_node(0).unwrap();
         assert_eq!(graph.node(cast).target, "aten._to_copy.default");
         assert_eq!(graph.node(cast).arg_node(0), Some(truncated));
-    }
-
-    #[test]
-    fn copy_lowering_uses_logical_shapes_before_memory_format_conversion() {
-        let mut graph = IrGraph::empty();
-        let dst = placeholder(&mut graph, "dst", [1, 2, 3, 4], "torch.float32");
-        let src = placeholder(&mut graph, "src", [1, 2, 3, 4], "torch.float32");
-        let copy = call(
-            &mut graph,
-            "copy",
-            "aten.copy.default",
-            vec![IrArg::Node(dst), IrArg::Node(src)],
-            [1, 2, 3, 4],
-            "torch.float32",
-        );
-        let sum = call(
-            &mut graph,
-            "sum",
-            "aten.add.Tensor",
-            vec![IrArg::Node(copy), IrArg::Node(src)],
-            [1, 2, 3, 4],
-            "torch.float32",
-        );
-        output(&mut graph, sum);
-
-        assert!(IrRemoveNoopPass.run(&mut graph));
-        assert!(crate::fx_memory_format_ir::IrToTosaMemoryFormatPass.run(&mut graph));
-
-        assert!(!graph.node(copy).alive);
-        assert_eq!(graph.node(sum).arg_node(0), graph.node(sum).arg_node(1));
-        // Elementwise-only graphs stay logical (NCHW): no boundary transpose.
-        let input = graph.node(sum).arg_node(0).unwrap();
-        assert_eq!(graph.node(input).name, "src");
-        assert_eq!(
-            graph
-                .node(sum)
-                .meta
-                .tosa_dim_order()
-                .map(|order| order.to_vec()),
-            Some(vec![0, 1, 2, 3])
-        );
     }
 }

@@ -6,7 +6,7 @@ use crate::fx_constant_tensor_eval::{
     plan_constant_reciprocal_tensor, plan_constant_slice_tensor_from_constants,
     plan_shape_only_tensor_from_constants,
 };
-use crate::fx_fuse_zero_input_constants_ir::zero_input_tensor;
+use crate::fx_fuse_zero_input_constants_ir::{zero_input_tensor_with, FullQParams};
 use crate::fx_ir::{EffectfulIrPass, EffectfulIrPassResult, IrArg, IrGraph, IrNode, NodeOp};
 use crate::fx_target::{
     is_comparison_target, is_reciprocal_target, is_shape_only_constant_target,
@@ -17,18 +17,31 @@ use crate::store::TensorData;
 
 pub struct IrFuseConstantInputsEffectPass {
     include_data_slices: bool,
+    /// How the `full` factories the folds read are quantized.
+    full_qparams: FullQParams,
 }
 
 impl IrFuseConstantInputsEffectPass {
     pub const fn matmul_only() -> Self {
         Self {
             include_data_slices: false,
+            full_qparams: FullQParams::Planner,
         }
     }
 
     pub const fn with_data_slices() -> Self {
         Self {
             include_data_slices: true,
+            full_qparams: FullQParams::Planner,
+        }
+    }
+
+    /// Seed the `full` factories with `full_qparams`, so the folds read the
+    /// bytes those factories are materialized with.
+    pub(crate) const fn with_full_qparams(self, full_qparams: FullQParams) -> Self {
+        Self {
+            full_qparams,
+            ..self
         }
     }
 }
@@ -96,7 +109,7 @@ impl EffectfulIrPass for IrFuseConstantInputsEffectPass {
             {
                 continue;
             }
-            if let Some(tensor) = zero_input_tensor(graph, node) {
+            if let Some(tensor) = zero_input_tensor_with(graph, node, self.full_qparams) {
                 constant_nodes.insert(node.id);
                 constant_tensors.insert(node.id, tensor);
             }

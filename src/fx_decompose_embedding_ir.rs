@@ -1,6 +1,6 @@
-//! Pure Rust IrPass: aten.embedding(weight, indices, ...) -> aten.index.Tensor(weight, [indices]).
+//! Pure Rust IrPass: `aten.embedding(weight, indices, ...)` -> `aten.index.Tensor(weight, [indices])`.
 //!
-//! Embedding is a row-gather (weight[indices]); routing it through index.Tensor reuses the existing
+//! Embedding is a row-gather (`weight[indices]`); routing it through index.Tensor reuses the existing
 //! GATHER lowering (IrDecomposeIndexTensor). Without this, aten.embedding is an unhandled serialize
 //! target that gets dropped, leaving every downstream consumer with a dangling tensor reference
 //! (the ref-model "(!found)" failure that broke the text-encoder transformer models).

@@ -397,7 +397,7 @@ fn decompose_dim_extrema(graph: &mut IrGraph, id: NodeId) -> bool {
     let mut reduce_meta = value_meta
         .tensor_stamp_same_dtype_or_dtype_of_or_float32(&input_meta)
         .preserve_qparams(keepdim_shape);
-    reduce_meta.copy_dim_order_facts_from(&input_meta);
+    reduce_meta.copy_val_dim_order_from(&input_meta);
 
     let squeeze_id = {
         let mut cursor = graph.rewrite_cursor(id);

@@ -22,25 +22,22 @@ pub fn register(table: &mut EmitterTable) {
 struct ParsedSelectCopySpec {
     input_name: String,
     input_shape: Vec<i32>,
-    mapped_dim: usize,
+    dim: usize,
     index: i32,
     dtype: DType,
-    pre_reshape_perms: Option<Vec<i32>>,
 }
 
 #[derive(Debug)]
 struct ParsedSliceSpec {
     input_name: String,
     input_shape: Vec<i32>,
-    raw_dim: i64,
-    mapped_dim: usize,
+    dim: usize,
     start: i64,
     end: i64,
     step: i64,
     start_shape: Vec<i32>,
     size_shape: Vec<i32>,
     input_target: String,
-    input_order: String,
 }
 
 impl ParsedSelectCopySpec {
@@ -57,81 +54,10 @@ impl ParsedSelectCopySpec {
 
         let raw_dim = arg_i64(node, 1, 0);
         let rank = input_shape.len() as i64;
-        let normalized_dim = if raw_dim < 0 { raw_dim + rank } else { raw_dim };
-        let mapped_dim = input_node
-            .map(|n| map_axis_to_tosa_dim_order(graph, n, normalized_dim as i32) as usize)
-            .unwrap_or(normalized_dim as usize);
-
-        let input_order: Vec<usize> = input_node
-            .map(|n| {
-                let rank = input_shape.len();
-                let mut order = vec![0usize; rank];
-                let mut seen = vec![false; rank];
-                let mut valid = true;
-                for raw_axis in 0..rank {
-                    let pos = map_axis_to_tosa_dim_order(graph, n, raw_axis as i32) as usize;
-                    if pos >= rank || seen[pos] {
-                        valid = false;
-                        break;
-                    }
-                    order[pos] = raw_axis;
-                    seen[pos] = true;
-                }
-                if valid {
-                    order
-                } else {
-                    n.meta
-                        .tosa_dim_order
-                        .clone()
-                        .map(|order| order.into_iter().map(|axis| axis as usize).collect())
-                        .unwrap_or_else(|| (0..rank).collect())
-                }
-            })
-            .unwrap_or_else(|| (0..input_shape.len()).collect());
-        let normalized_dim = normalized_dim as usize;
-        let remaining_axes: Vec<usize> = (0..input_shape.len())
-            .filter(|&axis| axis != normalized_dim)
-            .collect();
-        let output_rank = raw_i32_shape(node).len();
-        let output_order: Vec<usize> = node
-            .meta
-            .tosa_dim_order
-            .clone()
-            .map(|order| order.into_iter().map(|axis| axis as usize).collect())
-            .unwrap_or_else(|| (0..remaining_axes.len()).collect());
-        // `select_copy` removes one logical axis and then collapses the
-        // selected size-1 dimension with a reshape. For outputs below rank 4,
-        // keep the surviving axes in raw logical order so the user-visible
-        // tensor is not silently channels-last. For rank-4 outputs, keep using
-        // the node's internal dim order so the serializer can still append its
-        // normal output-layout transpose back to raw order.
-        let mut desired_axes: Vec<usize> = if output_rank < 4 {
-            remaining_axes.clone()
-        } else {
-            output_order
-                .iter()
-                .filter_map(|&output_axis| remaining_axes.get(output_axis).copied())
-                .collect()
-        };
-        desired_axes.push(normalized_dim);
-        let perms: Vec<i32> = desired_axes
-            .iter()
-            .filter_map(|axis| input_order.iter().position(|&candidate| candidate == *axis))
-            .map(|pos| pos as i32)
-            .collect();
-        let pre_reshape_perms = if perms.len() == input_shape.len()
-            && perms
-                .iter()
-                .enumerate()
-                .any(|(idx, &perm)| perm != idx as i32)
-        {
-            Some(perms)
-        } else {
-            None
-        };
+        let dim = (if raw_dim < 0 { raw_dim + rank } else { raw_dim }) as usize;
 
         let raw_index = arg_i64(node, 2, 0);
-        let dim_size = input_shape.get(mapped_dim).copied().unwrap_or(1) as i64;
+        let dim_size = input_shape.get(dim).copied().unwrap_or(1) as i64;
         let index = if raw_index < 0 {
             (dim_size + raw_index).max(0) as i32
         } else {
@@ -141,10 +67,9 @@ impl ParsedSelectCopySpec {
         Self {
             input_name,
             input_shape,
-            mapped_dim,
+            dim,
             index,
             dtype: node_output_dtype(node),
-            pre_reshape_perms,
         }
     }
 }
@@ -165,19 +90,14 @@ impl ParsedSliceSpec {
             return Self {
                 input_name,
                 input_shape,
-                raw_dim: 0,
-                mapped_dim: 0,
+                dim: 0,
                 start: 0,
                 end: 0,
                 step: 1,
-                start_shape: apply_tosa_dim_order(node, shape_arg_i32_list(graph, node, 1)),
-                size_shape: apply_tosa_dim_order(node, shape_arg_i32_list(graph, node, 2)),
+                start_shape: shape_arg_i32_list(graph, node, 1),
+                size_shape: shape_arg_i32_list(graph, node, 2),
                 input_target: input_node
                     .map(|n| format!("{:?}", n.target))
-                    .unwrap_or_default(),
-                input_order: input_node
-                    .and_then(|n| n.meta.tosa_dim_order.as_ref())
-                    .map(|order| format!("{order:?}"))
                     .unwrap_or_default(),
             };
         }
@@ -185,24 +105,11 @@ impl ParsedSliceSpec {
         let raw_dim = arg_i64(node, 1, 0);
         let rank = input_shape.len() as i64;
         let raw_dim = if raw_dim < 0 { raw_dim + rank } else { raw_dim };
-        let raw_dim = raw_dim.clamp(0, rank.saturating_sub(1));
-        let mapped_dim = node
-            .meta
-            .tosa_dim_order
-            .as_ref()
-            .map(|_| map_axis_to_tosa_dim_order(graph, node, raw_dim as i32) as i64)
-            .or_else(|| {
-                input_node.map(|n| map_axis_to_tosa_dim_order(graph, n, raw_dim as i32) as i64)
-            })
-            .unwrap_or(raw_dim) as usize;
+        let dim = raw_dim.clamp(0, rank.saturating_sub(1)) as usize;
         let start = arg_i64(node, 2, 0);
-        let end = arg_i64(
-            node,
-            3,
-            input_shape.get(mapped_dim).copied().unwrap_or(0) as i64,
-        );
+        let end = arg_i64(node, 3, input_shape.get(dim).copied().unwrap_or(0) as i64);
         let step = arg_i64(node, 4, 1);
-        let input_dim = input_shape.get(mapped_dim).copied().unwrap_or(0) as i64;
+        let input_dim = input_shape.get(dim).copied().unwrap_or(0) as i64;
         let start_idx = if start < 0 {
             (input_dim + start).max(0)
         } else {
@@ -217,34 +124,24 @@ impl ParsedSliceSpec {
         };
 
         let mut start_shape = vec![0; input_shape.len()];
-        start_shape[mapped_dim] = start_idx as i32;
+        start_shape[dim] = start_idx as i32;
         let mut size_shape = input_shape.clone();
-        size_shape[mapped_dim] = slice_len as i32;
+        size_shape[dim] = slice_len as i32;
 
         let input_target = input_node
             .map(|n| format!("{:?}", n.target))
-            .unwrap_or_else(|| "<none>".to_string());
-        let input_order = input_node
-            .and_then(|n| {
-                n.meta
-                    .tosa_dim_order
-                    .as_ref()
-                    .map(|order| format!("{:?}", order))
-            })
             .unwrap_or_else(|| "<none>".to_string());
 
         Self {
             input_name,
             input_shape,
-            raw_dim,
-            mapped_dim,
+            dim,
             start,
             end,
             step,
             start_shape,
             size_shape,
             input_target,
-            input_order,
         }
     }
 }
@@ -389,9 +286,9 @@ pub(super) fn emit_select_copy(ctx: &EmitContext) -> EmitResult {
 
     let slice_name = format!("{}_slice", node.name);
     let mut start_vec = vec![0i32; spec.input_shape.len()];
-    start_vec[spec.mapped_dim] = spec.index;
+    start_vec[spec.dim] = spec.index;
     let mut size_vec = spec.input_shape.clone();
-    size_vec[spec.mapped_dim] = 1;
+    size_vec[spec.dim] = 1;
 
     push_const_shape(&mut result, format!("{}_start", slice_name), start_vec);
     push_const_shape(
@@ -400,7 +297,7 @@ pub(super) fn emit_select_copy(ctx: &EmitContext) -> EmitResult {
         size_vec.clone(),
     );
     result.push_output_op(
-        TosaTensor::new(&slice_name, size_vec.clone(), spec.dtype),
+        TosaTensor::new(&slice_name, size_vec, spec.dtype),
         Op::Slice,
         Attribute::Slice(SliceAttribute {}),
         vec![
@@ -410,27 +307,10 @@ pub(super) fn emit_select_copy(ctx: &EmitContext) -> EmitResult {
         ],
     );
 
-    let mut reshape_input_name = slice_name;
-    let reshape_input_shape = size_vec;
-    if let Some(perms) = spec.pre_reshape_perms {
-        let transpose_name = format!("{}_layout", node.name);
-        let transpose_shape: Vec<i32> = perms
-            .iter()
-            .map(|&axis| reshape_input_shape[axis as usize])
-            .collect();
-        result.push_output_op(
-            TosaTensor::new(&transpose_name, transpose_shape, spec.dtype),
-            Op::Transpose,
-            Attribute::Transpose(TransposeAttribute { perms }),
-            vec![reshape_input_name],
-        );
-        reshape_input_name = transpose_name;
-    }
-
     let output_shape = ctx.shape();
     push_reshape_with_shape(
         &mut result,
-        reshape_input_name,
+        slice_name,
         node.name.clone(),
         format!("{}_shape", node.name),
         output_shape,
@@ -493,13 +373,11 @@ pub(super) fn emit_slice(ctx: &EmitContext) -> EmitResult {
 
     if crate::config::debug_slice_enabled() {
         eprintln!(
-            "[SliceDebug] node={} input_target={} input_order={} input_shape={:?} raw_dim={} mapped_dim={} start={} end={} step={} start_shape={:?} size_shape={:?}",
+            "[SliceDebug] node={} input_target={} input_shape={:?} dim={} start={} end={} step={} start_shape={:?} size_shape={:?}",
             node.name,
             spec.input_target,
-            spec.input_order,
             spec.input_shape,
-            spec.raw_dim,
-            spec.mapped_dim,
+            spec.dim,
             spec.start,
             spec.end,
             spec.step,

@@ -106,33 +106,51 @@ fn ordered_regions(
     order
 }
 
+/// Convert one stashed region like the parent.
+fn ingest_region((ir, effects): &StashedPipeline) -> (Graph, TensorStore) {
+    let mut sub_store = TensorStore::new();
+    let mut sub_graph =
+        crate::ingest::from_ir::graph_from_ir_preserve_placeholders(ir, &mut sub_store);
+    crate::ingest::from_ir::apply_effects_preserve_placeholders(
+        &mut sub_graph,
+        &mut sub_store,
+        effects,
+    );
+    crate::ingest::finalize::finalize_converted_graph(&mut sub_graph);
+    (sub_graph, sub_store)
+}
+
 pub(crate) fn append_subgraphs_from_ir(
     graphs: &mut Vec<(String, Graph)>,
     store: &mut TensorStore,
     parent_ir: &fx_ir::IrGraph,
     submodules: &BTreeMap<String, StashedPipeline>,
 ) -> PyResult<()> {
+    try_append_subgraphs_from_ir(graphs, store, parent_ir, submodules)
+        .map_err(PyRuntimeError::new_err)
+}
+
+/// [`append_subgraphs_from_ir`] without Python, so tests can link it: the error is the
+/// message the Python exception carries.
+pub(crate) fn try_append_subgraphs_from_ir(
+    graphs: &mut Vec<(String, Graph)>,
+    store: &mut TensorStore,
+    parent_ir: &fx_ir::IrGraph,
+    submodules: &BTreeMap<String, StashedPipeline>,
+) -> Result<(), String> {
     let (_, while_body_input_counts) = collect_region_metadata(parent_ir, submodules);
 
     for region in ordered_regions(parent_ir, submodules) {
         if graphs.iter().any(|(name, _)| name == &region) {
             continue;
         }
-        let Some((ir, effects)) = submodules.get(&region) else {
-            return Err(PyRuntimeError::new_err(format!(
+        let Some(stashed) = submodules.get(&region) else {
+            return Err(format!(
                 "missing stashed IrGraph for control-flow region '{region}'"
-            )));
+            ));
         };
 
-        let mut sub_store = TensorStore::new();
-        let mut sub_graph =
-            crate::ingest::from_ir::graph_from_ir_preserve_placeholders(ir, &mut sub_store);
-        crate::ingest::from_ir::apply_effects_preserve_placeholders(
-            &mut sub_graph,
-            &mut sub_store,
-            effects,
-        );
-        crate::ingest::finalize::finalize_converted_graph(&mut sub_graph);
+        let (mut sub_graph, mut sub_store) = ingest_region(stashed);
         if let Some(counts) = while_body_input_counts.get(&region).copied() {
             append_while_body_passthrough_outputs(&mut sub_graph, counts);
         }
@@ -149,10 +167,10 @@ pub(crate) fn append_subgraphs_from_ir(
                 // constant's name; stock keeps one tensor list per block, RETAB one
                 // store, so hand the graph to stock rather than lose either tensor.
                 Some(_) => {
-                    return Err(PyRuntimeError::new_err(format!(
+                    return Err(format!(
                         "RETAB_STOCK_FALLBACK: control-flow constant name collision: \
                          region '{region}' constant '{key}' differs from an earlier one"
-                    )));
+                    ));
                 }
             }
         }

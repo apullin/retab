@@ -109,44 +109,44 @@ classification in `fx_target.rs`; the later serializer graph has typed
 
 Linear follows rc4's DecomposeLinearPass: the rows go in the width of a 1x1
 convolution (`view [1, 1, rows, Ci]`, `permute(0, 3, 1, 2)`, conv,
-`permute(0, 2, 3, 1)`, `view`), so Vela never sees a batch of rows. Just
-before the layout pass, `fx_cancel_views_around_unary_ir.rs` turns
-`view(f(view(x)))` into `f(x)` when the outer view restores `x`'s shape and
-`f` is a per-tensor pointwise op, such as the activation between two Linears.
+`permute(0, 2, 3, 1)`, `view`), so Vela never sees a batch of rows.
 
 ## Layout
 
-RETAB records layout as a `tosa_dim_order` on each node's metadata rather
-than as explicit permute nodes. `IrToTosaMemoryFormatPass`
-([../src/fx_memory_format_ir.rs](../src/fx_memory_format_ir.rs)) gives rank-4
-and higher tensors a channels-last order when the graph has a spatial op, and
-keeps graphs without one logical end to end. It inserts TRANSPOSEs at graph
-inputs and outputs and around reshapes that change the channel axis, and it
-rewrites user permutes to act on the physical layout. The serializer reads the
-orders: constants are written permuted, and output shapes follow them.
+RETAB follows rc4's layout model (Linear APU-135). A node's value is its TOSA
+shape, and every layout change is an explicit `permute_copy` node, which the
+serializer lowers one-to-one to TRANSPOSE. The pipeline runs rc4's layout
+passes at their ArmPassManager positions, which
+[../src/fx_pipeline.rs](../src/fx_pipeline.rs) cites as `APM:<line>`:
 
-Layout islands are an interim rule until rc4's layout design is ported (Linear
-APU-135). A `permute(0, 2, 3, 1)` of a channels-last tensor, or a reshape of
-data that is already in logical order, opens an island. Its ops keep the
-identity order until the permute that restores channels-last, or until the data
-drops below rank 4. Both permutes then become identities. An island only forms
-when it is closed: no path may reach the graph output, a spatial op or control
-flow, and every rank-4 input must come from the island or from constants that
-only islands read.
+- `IrNormalizeDelegateIOLayoutPass` makes the delegate's inputs and outputs
+  contiguous.
+- The rewrites in `src/layout/rewrite_*.rs` turn convolutions, pools and
+  upsampling into channels-last TOSA ops between NHWC and NCHW permutes, with
+  pre-permuted weights.
+- The propagation and fusion passes in `src/layout/` move permutes and views
+  through the graph and cancel or fuse them, as rc4's do.
+- On Ethos-U55, `IrDecomposePermuteForU55Pass` splits permutes that Vela
+  can't run. It checks each live permute that breaks U55's worst-case rule
+  with rc4's one-TRANSPOSE Vela probe, called back into Python.
 
-`serialize/transpose_peephole.rs` cleans up each block after emission. It drops
-identity TRANSPOSEs and same-shape RESHAPEs, cancels inverse TRANSPOSE pairs,
-and turns TRANSPOSEs that only move size-1 axes into RESHAPEs.
+`src/layout/replay.rs` checks the ports against rc4 itself: it replays rc4's
+Python passes on captured graphs in `tests/fixtures/layout_replay/` and
+compares the results.
+
+RETAB's earlier model, which recorded a channels-last `tosa_dim_order` in node
+metadata for the serializer to apply, is deleted (APU-162): ingest and the
+serializer take each node's layout from its val.
 
 ## Metadata and constants
 
 [../src/fx_meta.rs](../src/fx_meta.rs) owns `TensorFacts`, `NodeMeta`,
 `TensorMetaStamp`, and `QParamMap`. `fx_ir.rs` re-exports the metadata types
-used by passes. Tensor shape and dtype, input/output quantization, layout,
-and additional backend metadata belong to this domain.
+used by passes. Tensor shape, dtype and torch dim order (`val_dim_order`),
+input/output quantization, and passthrough backend keys belong to this domain.
 
-Passes must deliberately preserve, restamp, or clear tensor, quantization,
-and layout facts when replacing nodes. Shared metadata helpers and domain
+Passes must deliberately preserve, restamp, or clear tensor (including its dim
+order) and quantization facts when replacing nodes. Shared metadata helpers and domain
 modules such as `fx_quant.rs`, `fx_reduction.rs`, and `fx_index_domain.rs`
 keep these semantics consistent.
 
@@ -199,9 +199,8 @@ emitted in stock's pre-order: cond branches as `[1, 2]`, while loops as
 
 [../src/serialize/mod.rs](../src/serialize/mod.rs) coordinates serialization
 and clears per-serialization shape/dtype caches. The implementation is split
-across `collection.rs`, `constant_pool.rs`, `tensor_layout.rs`,
-`output_layout.rs`, `transpose_peephole.rs`, `attribute_flatbuffer.rs`, and
-`flatbuffer.rs`.
+across `collection.rs`, `constant_pool.rs`, `tensor_decl.rs`,
+`attribute_flatbuffer.rs`, and `flatbuffer.rs`.
 
 `serialize/visitors/mod.rs` builds a domain-registered emitter dispatch table
 keyed by `graph::ir::OpTarget`. Each visitor receives `EmitContext` and
@@ -227,8 +226,7 @@ cargo test --lib --locked
 PYTHONPATH="$RETAB_ROOT/python" "$VENV/bin/python" -P -m pytest tests
 ```
 
-Homebrew `flatc` >= 25 must precede conda's `flatc` 24 on `PATH` for
-`tosa-rs` code generation. This crate is a `cdylib`; `cargo build --lib`
+This crate is a `cdylib`; `cargo build --lib`
 alone does not supply the required extension linkage. The
 `pyo3/extension-module` feature belongs only to maturin's feature list.
 Maturin derives the Python package version from `Cargo.toml`.

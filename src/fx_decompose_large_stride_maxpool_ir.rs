@@ -55,9 +55,7 @@ impl IrPass for IrDecomposeLargeStrideMaxPool2dForU55Pass {
                     }
                     match graph.nodes[user].arg_int(1) {
                         Some(0) => value_users.push(user),
-                        Some(1) if graph.live_user_ids(user).is_empty() => {
-                            unused_indices.push(user)
-                        }
+                        Some(1) if graph.users(user).is_empty() => unused_indices.push(user),
                         _ => return false,
                     }
                 }

@@ -697,7 +697,7 @@ mod tests {
 
             assert!(!IrInsertInt32RescalePass.run(&mut graph));
             assert!(matches!(graph.node(binary).args[0], IrArg::Node(id) if id == x_dq));
-            assert!(graph.live_user_ids(binary).contains(&out_q));
+            assert!(graph.users(binary).contains(&out_q));
             assert_eq!(graph.node(user).first_node_arg(), Some(out_q));
             assert!(graph.live_nodes().all(|node| !node.is_rescale()));
         }

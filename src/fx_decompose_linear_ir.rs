@@ -9,8 +9,7 @@
 //!   5. permute(0,2,3,1) -> [1, 1, rows, Co]
 //!   6. view            -> [..., Co]
 //!
-//! In NHWC the rows are the width, so Vela never sees a batch of `rows`. The layout
-//! pass turns both permutes into no-ops (see `fx_memory_format_ir` layout islands).
+//! In NHWC the rows are the width, so Vela never sees a batch of `rows`.
 
 use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId};
 use crate::runner_logging::log_line;

@@ -30,7 +30,6 @@ pub(crate) fn is_layout_dtype_passthrough(target: &OpTarget) -> bool {
             | OpTarget::Expand
             | OpTarget::Contiguous
             | OpTarget::TosaReshape
-            | OpTarget::TosaTranspose
             | OpTarget::TosaIdentity
     )
 }
@@ -38,15 +37,13 @@ pub(crate) fn is_layout_dtype_passthrough(target: &OpTarget) -> bool {
 pub(crate) fn is_accumulator_output(target: &OpTarget) -> bool {
     matches!(
         target,
-        OpTarget::Conv2d
-            | OpTarget::ConvTranspose2d
-            | OpTarget::DepthwiseConv2d
-            | OpTarget::Linear
+        OpTarget::Linear
             | OpTarget::Addmm
             | OpTarget::Matmul
             | OpTarget::Bmm
             | OpTarget::TosaConv2d
             | OpTarget::TosaDepthwiseConv2d
+            | OpTarget::TosaConv3d
             | OpTarget::TosaTransposeConv2d
             | OpTarget::TosaMatmul
     )
@@ -109,45 +106,46 @@ pub(crate) fn is_qdq_shape_passthrough(target: &OpTarget) -> bool {
     }
 }
 
-pub(crate) fn is_tosa_transpose(target: &OpTarget) -> bool {
-    matches!(target, OpTarget::TosaTranspose)
-}
-
 pub(crate) fn is_transpose_shape_op(target: &OpTarget) -> bool {
-    matches!(target, OpTarget::TosaTranspose | OpTarget::Permute)
+    matches!(target, OpTarget::Permute)
 }
 
 pub(crate) fn is_slice_shape_op(target: &OpTarget) -> bool {
     matches!(target, OpTarget::Slice | OpTarget::TosaSlice)
 }
 
-pub(crate) fn is_sum_reduction(target: &OpTarget) -> bool {
-    matches!(target, OpTarget::Sum | OpTarget::TosaReduceSum)
-}
-
 pub(crate) fn is_aten_sum(target: &OpTarget) -> bool {
     matches!(target, OpTarget::Sum)
 }
 
-pub(crate) fn is_max_pool(target: &OpTarget) -> bool {
-    matches!(target, OpTarget::MaxPool2d | OpTarget::TosaMaxPool2d)
-}
-
-pub(crate) fn is_avg_pool(target: &OpTarget) -> bool {
-    matches!(target, OpTarget::AvgPool2d | OpTarget::TosaAvgPool2d)
-}
-
-pub(crate) fn uses_nhwc_layout_shape(target: &OpTarget) -> bool {
+/// TOSA-dialect ops whose val is their TOSA shape, so the serializer reads it as is
+/// rather than recomputing it from their arguments (P2 design §4.2 G1, critique B1).
+pub(crate) fn has_tosa_shape_val(target: &OpTarget) -> bool {
     matches!(
         target,
-        OpTarget::Conv2d
-            | OpTarget::DepthwiseConv2d
-            | OpTarget::TosaConv2d
+        OpTarget::TosaConv2d
             | OpTarget::TosaDepthwiseConv2d
-            | OpTarget::MaxPool2d
-            | OpTarget::AvgPool2d
+            | OpTarget::TosaConv3d
+            | OpTarget::TosaTransposeConv2d
             | OpTarget::TosaMaxPool2d
             | OpTarget::TosaAvgPool2d
+            | OpTarget::TosaResize
+    )
+}
+
+/// Aten conv, pool and upsample ops. They have no visitor: rc4's rewrites turn them into
+/// TOSA ops before serialization (P2 design X5, critique B11).
+pub(crate) fn is_aten_spatial_layout_op(target: &OpTarget) -> bool {
+    matches!(
+        target,
+        OpTarget::Conv1d
+            | OpTarget::Conv2d
+            | OpTarget::ConvTranspose2d
+            | OpTarget::MaxPool2d
+            | OpTarget::AvgPool2d
+            | OpTarget::AdaptiveAvgPool2d
+            | OpTarget::UpsampleNearest2d
+            | OpTarget::UpsampleBilinear2d
     )
 }
 
@@ -162,27 +160,5 @@ pub(crate) fn is_matmul_shape_op(target: &OpTarget) -> bool {
     matches!(
         target,
         OpTarget::Matmul | OpTarget::Bmm | OpTarget::TosaMatmul
-    )
-}
-
-pub(crate) fn is_conv_weight_source(target: &OpTarget) -> bool {
-    matches!(
-        target,
-        OpTarget::Conv2d
-            | OpTarget::DepthwiseConv2d
-            | OpTarget::TosaConv2d
-            | OpTarget::TosaConv3d
-            | OpTarget::TosaDepthwiseConv2d
-    )
-}
-
-pub(crate) fn is_weight_layout_passthrough(target: &OpTarget) -> bool {
-    matches!(
-        target,
-        OpTarget::TosaTranspose
-            | OpTarget::Permute
-            | OpTarget::Reshape
-            | OpTarget::TosaReshape
-            | OpTarget::View
     )
 }

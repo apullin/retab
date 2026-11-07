@@ -49,9 +49,6 @@ pub struct PipelineConfig {
     pub leaky_relu: LeakyReluLoweringConfig,
     pub quantize_inf: QuantizeInfConfig,
     pub sdpa_safe_softmax_guard: SdpaSafeSoftmaxGuardPolicy,
-    /// Permutes that Vela can't run on U55 (rc4's probe, run in Python); split by
-    /// `IrDecomposePermuteForU55Pass`.
-    pub u55_split_permutes: std::collections::HashSet<String>,
 }
 
 fn required<'py, T: FromPyObjectOwned<'py>>(config: &Bound<'py, PyDict>, key: &str) -> PyResult<T> {
@@ -82,7 +79,6 @@ impl PipelineConfig {
             leaky_relu: LeakyReluLoweringConfig::Decompose,
             quantize_inf: QuantizeInfConfig::default(),
             sdpa_safe_softmax_guard: SdpaSafeSoftmaxGuardPolicy::Preserve,
-            u55_split_permutes: Default::default(),
         }
     }
 
@@ -124,9 +120,6 @@ impl PipelineConfig {
             neg_inf: required(&quantize_inf, "neg_inf")?,
             pos_inf: required(&quantize_inf, "pos_inf")?,
         };
-        if let Some(names) = config.get_item("u55_split_permutes")? {
-            result.u55_split_permutes = names.extract::<Vec<String>>()?.into_iter().collect();
-        }
         result.validate().map_err(PyValueError::new_err)?;
         Ok(result)
     }

@@ -242,12 +242,6 @@ pub(crate) fn is_shape_only_constant_target(target: &str) -> bool {
     shape_only_constant_target(target).is_some()
 }
 
-pub(crate) fn is_constant_only_shape_transform_target(target: &str) -> bool {
-    is_view_like_target(target)
-        || shape_only_constant_target(target).is_some()
-        || is_slice_copy_tensor_target(target)
-}
-
 pub(crate) fn noop_target(target: &str) -> Option<NoopTarget> {
     match target {
         "aten.copy.default" => Some(NoopTarget::CopySourceArg),
@@ -280,13 +274,6 @@ pub(crate) fn is_permute_target(target: &str) -> bool {
     matches!(target, "aten.permute_copy.default" | "aten.permute.default")
 }
 
-pub(crate) fn is_tosa_transpose_target(target: &str) -> bool {
-    matches!(
-        target,
-        "backend.tosa.TRANSPOSE.default" | "tosa.TRANSPOSE.default"
-    )
-}
-
 pub(crate) fn is_boundary_rescale_target(target: &str) -> bool {
     matches!(
         classify_ir_target(target),
@@ -298,7 +285,6 @@ pub(crate) fn is_layout_passthrough_target(target: &str) -> bool {
     is_rank_changing_layout_target(target)
         || is_permute_target(target)
         || is_dim_transpose_target(target)
-        || is_tosa_transpose_target(target)
         || matches!(
             target,
             "aten.contiguous.default" | "backend.tosa.IDENTITY.default" | "tosa.IDENTITY.default"
@@ -313,15 +299,6 @@ pub(crate) fn is_rank_changing_layout_target(target: &str) -> bool {
             target,
             "backend.tosa.RESHAPE.default" | "tosa.RESHAPE.default"
         )
-}
-
-pub(crate) fn is_transpose_conv2d_target(target: &str) -> bool {
-    matches!(
-        target,
-        "aten.conv_transpose2d.input"
-            | "backend.tosa.TRANSPOSE_CONV2D.default"
-            | "tosa.TRANSPOSE_CONV2D.default"
-    )
 }
 
 pub(crate) fn is_conv1d_default_target(target: &str) -> bool {
@@ -340,69 +317,11 @@ pub(crate) fn is_aten_convolution_default_target(target: &str) -> bool {
     target == "aten.convolution.default"
 }
 
-pub(crate) fn is_conv_bias_annotation_target(target: &str) -> bool {
-    is_aten_convolution_default_target(target)
-        || is_conv2d_default_target(target)
-        || is_conv3d_default_target(target)
-        || is_transpose_conv2d_target(target)
-        || matches!(
-            target,
-            "backend.tosa.CONV2D.default"
-                | "tosa.CONV2D.default"
-                | "backend.tosa.CONV3D.default"
-                | "tosa.CONV3D.default"
-                | "backend.tosa.DEPTHWISE_CONV2D.default"
-                | "tosa.DEPTHWISE_CONV2D.default"
-        )
-}
-
 pub(crate) fn is_raw_aten_convolution_target(target: &str) -> bool {
     matches!(
         target,
         "aten.convolution.default" | "edge__ops_aten_convolution.default"
     )
-}
-
-/// Targets that lower to TOSA ops consuming physical (channels-last) layout.
-/// Stock only transposes around such ops; graphs without them stay logical
-/// (NCHW) end to end.
-pub(crate) fn is_physical_layout_target(target: &str) -> bool {
-    is_conv_bias_annotation_target(target)
-        || is_raw_aten_convolution_target(target)
-        || is_conv1d_default_target(target)
-        || is_plain_avg_pool2d_target(target)
-        || is_adaptive_avg_pool2d_target(target)
-        || is_max_pool2d_target(target)
-        || matches!(
-            target,
-            "backend.tosa.AVG_POOL2D.default"
-                | "tosa.AVG_POOL2D.default"
-                | "backend.tosa.MAX_POOL2D.default"
-                | "tosa.MAX_POOL2D.default"
-                | "aten.adaptive_max_pool2d.default"
-                // TOSA RESIZE is defined on NHWC too (stock wraps it in permutes).
-                | "aten.upsample_nearest2d.default"
-                | "aten.upsample_nearest2d.vec"
-                | "aten.upsample_bilinear2d.default"
-                | "aten.upsample_bilinear2d.vec"
-                | "backend.tosa.RESIZE.default"
-                | "tosa.RESIZE.default"
-        )
-}
-
-pub(crate) fn is_conv_accumulator_target(target: &str) -> bool {
-    is_raw_aten_convolution_target(target)
-        || matches!(
-            target,
-            "aten.conv2d.default"
-                | "aten.conv2d.padding"
-                | "backend.tosa.CONV2D.default"
-                | "tosa.CONV2D.default"
-                | "backend.tosa.DEPTHWISE_CONV2D.default"
-                | "tosa.DEPTHWISE_CONV2D.default"
-                | "backend.tosa.CONV3D.default"
-                | "tosa.CONV3D.default"
-        )
 }
 
 pub(crate) fn size_adjust_target_kind(target: &str) -> Option<SizeAdjustTargetKind> {
@@ -718,21 +637,16 @@ mod tests {
             is_zero_input_constant_target,
             is_fold_qdq_constant_target,
             is_shape_only_constant_target,
-            is_constant_only_shape_transform_target,
             is_view_like_target,
             is_permute_target,
-            is_tosa_transpose_target,
             is_boundary_rescale_target,
             is_layout_passthrough_target,
             is_rank_changing_layout_target,
-            is_transpose_conv2d_target,
             is_conv1d_default_target,
             is_conv2d_default_target,
             is_conv3d_default_target,
             is_aten_convolution_default_target,
-            is_conv_bias_annotation_target,
             is_raw_aten_convolution_target,
-            is_conv_accumulator_target,
             is_split_target,
             is_slice_copy_tensor_target,
             is_slice_tensor_target,
@@ -763,7 +677,6 @@ mod tests {
             is_where_target,
             is_to_copy_target,
             is_reciprocal_target,
-            is_physical_layout_target,
             is_masked_fill_target,
             is_select_scatter_target,
             is_clamp_target,
@@ -1000,22 +913,12 @@ mod tests {
         assert!(!is_to_copy_target("aten.copy.default"));
         assert!(is_reciprocal_target("aten.reciprocal.default"));
         assert!(!is_reciprocal_target("aten.rsqrt.default"));
-        assert!(is_physical_layout_target("aten.convolution.default"));
-        assert!(is_physical_layout_target("aten.avg_pool2d.default"));
-        assert!(is_physical_layout_target("aten.max_pool2d.default"));
-        assert!(is_physical_layout_target("backend.tosa.CONV2D.default"));
-        assert!(!is_physical_layout_target("aten.mul.Tensor"));
-        assert!(!is_physical_layout_target("aten.rsqrt.default"));
         assert_true(
             is_fold_qdq_constant_target,
             &["aten.scalar_tensor.default", "aten.full_like.default"],
         );
         assert_false(is_fold_qdq_constant_target, &["aten.reshape.default"]);
         assert!(is_shape_only_constant_target("aten.permute_copy.default"));
-        assert_true(
-            is_constant_only_shape_transform_target,
-            &["aten.slice_copy.Tensor", "aten.flatten.using_ints"],
-        );
         assert!(is_view_like_target("aten._unsafe_view.default"));
         assert!(is_permute_target("aten.permute.default"));
     }
@@ -1096,7 +999,6 @@ mod tests {
                 "tosa.RESHAPE.default",
             ],
         );
-        assert!(is_tosa_transpose_target("backend.tosa.TRANSPOSE.default"));
         assert!(is_rank_changing_layout_target("aten.flatten.using_ints"));
         assert_false(is_rank_changing_layout_target, &["aten.transpose.int"]);
         assert_false(
@@ -1111,13 +1013,6 @@ mod tests {
     #[test]
     fn recognizes_convolution_target_families() {
         assert_true(
-            is_conv_bias_annotation_target,
-            &[
-                "aten.conv3d.default",
-                "backend.tosa.TRANSPOSE_CONV2D.default",
-            ],
-        );
-        assert_true(
             is_raw_aten_convolution_target,
             &[
                 "aten.convolution.default",
@@ -1130,14 +1025,6 @@ mod tests {
         assert!(is_conv1d_default_target("aten.conv1d.default"));
         assert!(is_conv2d_default_target("aten.conv2d.default"));
         assert!(is_conv3d_default_target("aten.conv3d.default"));
-        assert_true(
-            is_conv_accumulator_target,
-            &[
-                "backend.tosa.CONV2D.default",
-                "backend.tosa.DEPTHWISE_CONV2D.default",
-                "aten.conv2d.padding",
-            ],
-        );
         assert_cases(
             size_adjust_target_kind,
             &[

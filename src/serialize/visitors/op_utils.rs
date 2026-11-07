@@ -28,8 +28,7 @@ fn emitted_binary_input_shapes(graph: &Graph, store: &TensorStore, node: &Node) 
 
         let target = broadcast_shape_for_binary_inputs(
             &raw_i32_shape(input_nodes[smaller_idx]),
-            &raw_i32_shape(input_nodes[larger_idx]),
-            node,
+            val_rank(input_nodes[larger_idx]),
         );
         if target.len() == shapes[larger_idx].len() {
             shapes[smaller_idx] = target;
@@ -40,15 +39,14 @@ fn emitted_binary_input_shapes(graph: &Graph, store: &TensorStore, node: &Node) 
 }
 
 fn binary_output_shapes(graph: &Graph, store: &TensorStore, node: &Node) -> (Vec<i32>, Vec<i32>) {
-    let logical_shape = logical_output_shape(node);
+    let val_shape = raw_i32_shape(node);
     let emitted_shape = emitted_binary_input_shapes(graph, store, node)
         .into_iter()
         .reduce(|lhs, rhs| broadcast_two_shapes(&lhs, &rhs).unwrap_or(rhs))
         .unwrap_or_else(|| {
-            binary_input_broadcast_shape(graph, store, node)
-                .unwrap_or_else(|| logical_shape.clone())
+            binary_input_broadcast_shape(graph, store, node).unwrap_or_else(|| val_shape.clone())
         });
-    (logical_shape, emitted_shape)
+    (val_shape, emitted_shape)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -59,16 +57,16 @@ fn push_binary_output_with_contract(
     attribute: Attribute,
     inputs: Vec<String>,
     dtype: DType,
-    logical_shape: Vec<i32>,
+    val_shape: Vec<i32>,
     emitted_shape: Vec<i32>,
 ) {
-    // The temp+reshape contract is only valid for a rank/layout change (same element
-    // count). When emitted_shape is a pure broadcast of logical_shape (different element
-    // count), TOSA's native size-1 broadcasting already yields logical_shape, so emit
-    // directly rather than via an (invalid) element-count-changing reshape.
+    // The temp+reshape contract is only valid for a rank change (same element count).
+    // When emitted_shape is a pure broadcast of val_shape (different element count),
+    // TOSA's native size-1 broadcasting already yields val_shape, so emit directly
+    // rather than via an (invalid) element-count-changing reshape.
     let emitted_elems = emitted_shape.iter().map(|&d| d as i64).product::<i64>();
-    let logical_elems = logical_shape.iter().map(|&d| d as i64).product::<i64>();
-    if emitted_shape != logical_shape && emitted_elems == logical_elems {
+    let val_elems = val_shape.iter().map(|&d| d as i64).product::<i64>();
+    if emitted_shape != val_shape && emitted_elems == val_elems {
         let temp_name = format!("{}_broadcast_output", node.name);
         result.push_output_op(
             make_empty_tensor(temp_name.clone(), emitted_shape, dtype),
@@ -81,12 +79,12 @@ fn push_binary_output_with_contract(
             temp_name,
             node.name.clone(),
             format!("{}_shape", node.name),
-            logical_shape,
+            val_shape,
             dtype,
         );
     } else {
         result.push_output_op(
-            make_empty_tensor(node.name.clone(), logical_shape, dtype),
+            make_empty_tensor(node.name.clone(), val_shape, dtype),
             op,
             attribute,
             inputs,
@@ -123,7 +121,7 @@ pub(super) fn emit_direct_binary(
     if op == Op::Mul {
         inputs.push(push_shift_const(&mut result, &node.name));
     }
-    let (logical_shape, emitted_shape) = binary_output_shapes(graph, store, node);
+    let (val_shape, emitted_shape) = binary_output_shapes(graph, store, node);
     let output_dtype = node_output_dtype(node);
     push_binary_output_with_contract(
         &mut result,
@@ -132,7 +130,7 @@ pub(super) fn emit_direct_binary(
         attribute,
         inputs,
         output_dtype,
-        logical_shape,
+        val_shape,
         emitted_shape,
     );
     result
@@ -148,7 +146,7 @@ pub(super) fn emit_bool_binary(
 ) -> EmitResult {
     let mut result = EmitResult::default();
     let mut inputs = collect_binary_input_names(graph, store, node, &mut result);
-    let (logical_shape, emitted_shape) = binary_output_shapes(graph, store, node);
+    let (val_shape, emitted_shape) = binary_output_shapes(graph, store, node);
     for (idx, arg) in node.args.iter().enumerate().take(inputs.len()) {
         let Some(input_node) = arg.as_node().and_then(|id| graph.node(id)) else {
             continue;
@@ -177,7 +175,7 @@ pub(super) fn emit_bool_binary(
         attribute,
         inputs,
         DType::Bool,
-        logical_shape,
+        val_shape,
         emitted_shape,
     );
     result
@@ -289,67 +287,5 @@ mod tests {
         assert_eq!(result.operators[2].outputs, vec!["add".to_string()]);
         assert_eq!(result.tensors[0].shape, vec![1, 4, 5, 1]);
         assert_eq!(result.tensors[1].shape, vec![1, 4, 5]);
-    }
-
-    #[test]
-    fn binary_emit_uses_post_reshape_broadcast_shape_for_lower_rank_rhs() {
-        let mut graph = Graph::new();
-
-        let lhs = graph.create_node(
-            OpType::Placeholder,
-            OpTarget::Other("lhs".to_string()),
-            smallvec![],
-            Vec::new(),
-            meta(&[1, 1, 1024, 8], IrDType::Int32),
-            "lhs".to_string(),
-        );
-
-        let rhs = graph.create_node(
-            OpType::Placeholder,
-            OpTarget::Other("rhs".to_string()),
-            smallvec![],
-            Vec::new(),
-            meta(&[8, 1, 1], IrDType::Int32),
-            "rhs".to_string(),
-        );
-
-        let mut add_meta = meta(&[1, 1, 1024, 8], IrDType::Int32);
-        add_meta.tosa_dim_order = Some(smallvec![0, 2, 3, 1]);
-        let add = graph.create_node(
-            OpType::CallFunction,
-            OpTarget::Add,
-            smallvec![Arg::Node(lhs), Arg::Node(rhs)],
-            Vec::new(),
-            add_meta,
-            "add".to_string(),
-        );
-
-        let store = TensorStore::default();
-        let result = emit_direct_binary(
-            &graph,
-            graph.node(add).expect("add node"),
-            &store,
-            Op::Add,
-            Attribute::Add(AddAttribute {}),
-        );
-
-        // The lower-rank rhs is reshaped up to the broadcast rank before the add
-        // (ConstShape + Reshape -> add_input1_broadcast), then the result is reshaped
-        // back to the logical output shape.
-        assert_eq!(result.operators[0].op, Op::ConstShape);
-        assert_eq!(result.operators[1].op, Op::Reshape);
-        assert_eq!(
-            result.operators[1].outputs,
-            vec!["add_input1_broadcast".to_string()]
-        );
-        assert_eq!(result.operators[2].op, Op::Add);
-        assert_eq!(
-            result.operators[2].outputs,
-            vec!["add_broadcast_output".to_string()]
-        );
-        assert_eq!(result.operators[4].op, Op::Reshape);
-        assert_eq!(result.operators[4].outputs, vec!["add".to_string()]);
-        assert_eq!(result.tensors[0].shape, vec![1, 1, 1, 8]);
-        assert_eq!(result.tensors[1].shape, vec![1, 1, 1024, 8]);
     }
 }

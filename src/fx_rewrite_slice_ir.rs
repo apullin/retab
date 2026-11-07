@@ -41,41 +41,26 @@ mod tests {
     use crate::test_ir::{f32_call, f32_placeholder, output};
 
     #[test]
-    fn rewrites_static_slice_bounds_in_logical_order_after_layout_conversion() {
+    fn rewrites_static_slice_bounds() {
         let mut graph = IrGraph::empty();
-        let x = f32_placeholder(&mut graph, "x", [1, 3, 8, 10]);
-        let physical = f32_call(
-            &mut graph,
-            "physical",
-            "backend.tosa.TRANSPOSE.default",
-            vec![IrArg::Node(x), i64_list_arg(&[0, 2, 3, 1])],
-            [1, 8, 10, 3],
-        );
-        graph
-            .node_mut(physical)
-            .meta
-            .set_tosa_dim_order(vec![0, 1, 2, 3]);
+        let x = f32_placeholder(&mut graph, "x", [1, 8, 10, 3]);
         let sliced = f32_call(
             &mut graph,
             "slice",
             "aten.slice_copy.Tensor",
             vec![
-                IrArg::Node(physical),
-                IrArg::Int(2),
+                IrArg::Node(x),
+                IrArg::Int(1),
                 IrArg::Int(-6),
                 IrArg::Int(i64::MAX),
             ],
-            [1, 3, 6, 10],
+            [1, 6, 10, 3],
         );
-        graph
-            .node_mut(sliced)
-            .meta
-            .set_tosa_dim_order(vec![0, 2, 3, 1]);
         output(&mut graph, sliced);
         assert!(IrRewriteSlicePass.run(&mut graph));
         assert_eq!(graph.node(sliced).target, "backend.tosa.SLICE.default");
-        assert_eq!(graph.node(sliced).arg_int_list(1), Some(vec![0, 0, 2, 0]));
-        assert_eq!(graph.node(sliced).arg_int_list(2), Some(vec![1, 3, 6, 10]));
+        assert_eq!(graph.node(sliced).arg_int_list(1), Some(vec![0, 2, 0, 0]));
+        assert_eq!(graph.node(sliced).arg_int_list(2), Some(vec![1, 6, 10, 3]));
     }
 
     #[test]

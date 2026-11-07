@@ -59,11 +59,8 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
             let value_getitem = if is_with_indices {
                 let mut value_user = None;
                 let mut unsupported = false;
-                for &user_id in graph.users(id) {
+                for user_id in graph.live_user_ids(id) {
                     let user = &graph.nodes[user_id];
-                    if !user.alive {
-                        continue;
-                    }
                     if !user.is_getitem() {
                         unsupported = true;
                         break;
@@ -71,7 +68,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                     match user.args.get(1).and_then(|arg| arg.as_int()) {
                         Some(0) => value_user = Some(user_id),
                         Some(_) => {
-                            if !graph.live_user_ids(user_id).is_empty() {
+                            if !graph.users(user_id).is_empty() {
                                 unsupported = true;
                                 break;
                             }
@@ -241,14 +238,9 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
             if let Some(value_getitem) = value_getitem {
                 graph.replace_and_erase(value_getitem, result);
                 let extra_getitems: Vec<NodeId> = graph
-                    .users(id)
-                    .iter()
-                    .copied()
-                    .filter(|&user_id| {
-                        user_id != value_getitem
-                            && graph.nodes[user_id].alive
-                            && graph.nodes[user_id].is_getitem()
-                    })
+                    .live_user_ids(id)
+                    .into_iter()
+                    .filter(|&user_id| graph.nodes[user_id].is_getitem())
                     .collect();
                 for user_id in extra_getitems {
                     graph.erase(user_id);

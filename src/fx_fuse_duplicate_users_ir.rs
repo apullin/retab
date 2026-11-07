@@ -11,10 +11,24 @@ use crate::runner_logging::log_line;
 
 /// Build a signature string for a node based on its op, target, args and kwargs.
 fn node_signature(graph: &IrGraph, id: NodeId) -> String {
+    node_signature_from(graph, id, 0)
+}
+
+/// [`node_signature`] without the positional args before
+/// `positional_arg_start`: rc4's `build_node_signature(node,
+/// positional_arg_start=...)` (`backends/transforms/fuse_duplicate_users_pass.py:69-83`),
+/// which RewriteConvPass uses to compare RESCALE-to-permute heads apart from
+/// their inputs. Node args sign as their ids, as rc4's do as their names, and
+/// the args kept include trailing positional flags.
+pub(crate) fn node_signature_from(
+    graph: &IrGraph,
+    id: NodeId,
+    positional_arg_start: usize,
+) -> String {
     let node = &graph.nodes[id];
     let mut sig = format!("{:?}|{}", node.op, node.target);
     sig.push('|');
-    for (i, arg) in node.args.iter().enumerate() {
+    for (i, arg) in node.args.iter().skip(positional_arg_start).enumerate() {
         if i > 0 {
             sig.push(',');
         }

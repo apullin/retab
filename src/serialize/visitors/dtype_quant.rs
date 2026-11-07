@@ -200,6 +200,16 @@ fn actual_tensor_dtype_impl(graph: &Graph, node: &Node) -> DType {
         && node.meta.val.dtype.is_float() {
             return ir_dtype_to_tosa(node.meta.val.dtype);
         }
+    // A TOSA RESIZE inherits the upsample's int8 output qparam, but an int8 bilinear
+    // RESIZE produces int32 (INT48 when marked), which its RESCALE reads (P2 critique
+    // A8/B4).
+    if node.target == OpTarget::TosaResize {
+        return node
+            .meta
+            .tosa_special_dtype
+            .map(ir_dtype_to_tosa)
+            .unwrap_or_else(|| ir_dtype_to_tosa(node.meta.val.dtype));
+    }
     match node.target {
         ref target if op_semantics::is_layout_dtype_passthrough(target) => {
             match node.args.first() {
@@ -225,43 +235,6 @@ fn actual_tensor_dtype_impl(graph: &Graph, node: &Node) -> DType {
         }
         _ => node_output_dtype(node),
     }
-}
-
-fn producer_output_zero_point(graph: &Graph, node: &Node, pos: usize) -> Option<i32> {
-    let pos = pos as u32;
-    let Arg::Node(input_id) = node.args.get(pos as usize)? else {
-        return None;
-    };
-    let input_node = graph.node(*input_id)?;
-    input_node
-        .meta
-        .output_qparams
-        .iter()
-        .find(|(qp_pos, _)| *qp_pos == 0)
-        .or_else(|| {
-            input_node
-                .meta
-                .input_qparams
-                .iter()
-                .find(|(qp_pos, _)| *qp_pos == 0)
-        })
-        .map(|(_, qp)| qp.zero_point as i32)
-}
-
-pub(super) fn node_input_zero_point(
-    graph: &Graph,
-    node: &Node,
-    pos: usize,
-    kwarg_name: &str,
-    default: i32,
-) -> i32 {
-    producer_output_zero_point(graph, node, pos)
-        .or_else(|| input_qparam_zero_point(node, pos))
-        .unwrap_or_else(|| kwarg_i32(node, kwarg_name, default))
-}
-
-pub(super) fn node_output_zero_point(node: &Node, kwarg_name: &str, default: i32) -> i32 {
-    output_qparam_zero_point(node).unwrap_or_else(|| kwarg_i32(node, kwarg_name, default))
 }
 
 pub(super) fn matmul_input_dtype(graph: &Graph, node: &Node, index: usize) -> DType {
@@ -471,6 +444,8 @@ mod tests {
     }
 
     #[test]
+    // 0.7071 is an arbitrary scale near the rounding boundary, not 1/sqrt(2).
+    #[allow(clippy::approx_constant)]
     fn multiplier_and_shift_match_upstream() {
         for scale in [
             0.0, 1e-12, 3.1e-7, 0.000123, 0.00390625, 0.0213, 0.25, 0.4999999, 0.5, 0.7071,

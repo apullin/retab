@@ -147,6 +147,32 @@ def _edge_program(graph_module):
     return types.SimpleNamespace(graph_module=graph_module, graph_signature=signature)
 
 
+def test_dynamic_shape_export_goes_to_stock(monkeypatch):
+    """A batch/H/W-dynamic upsample, as in rc4's tosa_INT_dynamic_* op tests, stays on stock.
+
+    RETAB's IR is static. Without this fallback it lowers the graph with the example
+    input's sizes baked in: INT8 [2, 4, 8, 3] where stock emits [-1, 4, -1, -1]. The op
+    tests cannot see that, because they skip the output comparison for these cases.
+    """
+    import retab.preprocess as rp
+
+    batch = torch.export.Dim("batch", min=1, max=2)
+    height = torch.export.Dim("height", min=1, max=8)
+    width = torch.export.Dim("width", min=1, max=8)
+    program = torch.export.export(
+        torch.nn.Upsample(scale_factor=2.0, mode="nearest"),
+        (torch.rand(2, 4, 8, 3),),
+        dynamic_shapes=({0: batch, 2: height, 3: width},),
+    )
+    stock_result = object()
+    monkeypatch.setattr(rp, "stock_preprocess", lambda edge_program, compile_spec: stock_result)
+    before = rp._stock_fallback_counts["symbolic shapes"]
+
+    assert rp.stock_fallback_reason(program, _int_only_spec()) == "symbolic shapes"
+    assert rp._all_rust_preprocess(program, _int_only_spec()) is stock_result
+    assert rp._stock_fallback_counts["symbolic shapes"] == before + 1
+
+
 def test_int32_quantized_compute_lowers_without_fallback():
     import retab.preprocess as rp
 

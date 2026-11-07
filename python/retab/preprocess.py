@@ -407,6 +407,7 @@ def _has_registered_pass_insertions() -> bool:
 
 
 def _build_pipeline_config(compile_spec: TosaCompileSpec) -> dict:
+    """The compile spec's pipeline settings."""
     return {
         "tosa_spec": str(compile_spec.tosa_spec),
         "tosa_dev_mode": bool(compile_spec.tosa_dev_mode),
@@ -414,44 +415,36 @@ def _build_pipeline_config(compile_spec: TosaCompileSpec) -> dict:
     }
 
 
-def _u55_permutes_to_split(edge_program: ExportedProgram, compile_spec: TosaCompileSpec) -> list[str]:
-    """Permutes that rc4's DecomposePermuteForU55Pass splits on U55.
+def _u55_transpose_probe(
+    compile_spec: TosaCompileSpec,
+) -> Callable[[list[int], list[int], str], bool] | None:
+    """rc4's exact U55 TRANSPOSE check, for RETAB's IrDecomposePermuteForU55Pass.
 
-    Their input shape fails U55's worst-case TRANSPOSE rule and the installed Vela rejects
-    a one-TRANSPOSE probe, which is the same check stock runs. RETAB's Rust pass then
-    splits these nodes with upstream's chunk plan.
+    rc4's DecomposePermuteForU55Pass asks it about every permute alive at its slot whose
+    input breaks U55's worst-case rule. RETAB's passes create most of those permutes, so
+    the Rust pass calls this under the GIL with the permute's input shape, its dims and
+    the torch name of the TRANSPOSE's dtype, once per question. The check builds its
+    probe TOSA for the lowering context's TOSA version, so this enters a context, as
+    stock's pass manager does.
     """
     if not compile_spec.tosa_spec.is_U55_subset:
-        return []
+        return None
+    import torch
     from executorch.backends.arm._passes.decompose_permute_for_u55_pass import (
         DecomposePermuteForU55Pass,
     )
-    from executorch.backends.arm.constants import DQ_OPS
-    from executorch.exir.graph_module import get_cond_while_submodules
+    from executorch.backends.arm.tosa.specification import TosaLoweringContext
 
-    names = []
+    def violates(shape: list[int], permutation: list[int], dtype: str) -> bool:
+        torch_dtype = getattr(torch, dtype.removeprefix("torch."), None)
+        if not isinstance(torch_dtype, torch.dtype):
+            return True  # rc4's check rejects every dtype but int8, int16 and bool
+        with TosaLoweringContext(compile_spec.tosa_spec):
+            return DecomposePermuteForU55Pass._violates_exact_constraint(
+                tuple(shape), tuple(permutation), torch_dtype
+            )
 
-    def visit(graph_module) -> None:
-        for node in graph_module.graph.nodes:
-            if node.op != "call_function" or node.target not in DecomposePermuteForU55Pass._PERMUTE_OPS:
-                continue
-            producer = node.args[0]
-            val = producer.meta.get("val")
-            if val is None:
-                continue
-            shape = tuple(val.shape)
-            if not DecomposePermuteForU55Pass._violates_u55_worst_case_constraint(shape):
-                continue
-            # The TRANSPOSE runs on the quantized tensor, not the dequantized float.
-            dtype = producer.args[-1] if producer.target in DQ_OPS else val.dtype
-            permutation = tuple(dim % len(shape) for dim in node.args[1])
-            if DecomposePermuteForU55Pass._violates_exact_constraint(shape, permutation, dtype):
-                names.append(node.name)
-        for _, submodule, _ in get_cond_while_submodules(graph_module):
-            visit(submodule)
-
-    visit(edge_program.graph_module)
-    return names
+    return violates
 
 
 def _has_non_default_pipeline_config(compile_spec) -> bool:
@@ -549,9 +542,15 @@ def _all_rust_preprocess(
     from retab import _native as _rust
 
     pipeline_config = _build_pipeline_config(_compile_spec)
-    pipeline_config["u55_split_permutes"] = _u55_permutes_to_split(edge_program, _compile_spec)
+    # The U55 split judges the permutes alive at its slot, as rc4 does.
+    u55_transpose_probe = _u55_transpose_probe(_compile_spec)
     try:
-        _rust.run_fx_passes(gm, edge_program, pipeline_config=pipeline_config)
+        _rust.run_fx_passes(
+            gm,
+            edge_program,
+            pipeline_config=pipeline_config,
+            u55_transpose_probe=u55_transpose_probe,
+        )
         _run_control_flow_submodule_rust_passes(gm, edge_program, _rust, pipeline_config)
     except Exception as exc:  # noqa: BLE001 - Rust requests stock via message
         reason = _native_fallback_reason(exc)

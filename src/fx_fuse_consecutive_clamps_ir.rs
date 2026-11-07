@@ -74,10 +74,10 @@ impl IrPass for IrFuseConsecutiveClampsPass {
                         max.map(IrArg::Float).unwrap_or(IrArg::None),
                     ],
                 );
+                for key in ["min", "max", "self"] {
+                    graph.remove_kwarg(second, key);
+                }
                 let survivor = graph.node_mut(second);
-                survivor.kwargs.remove("min");
-                survivor.kwargs.remove("max");
-                survivor.kwargs.remove("self");
                 if let Some(qparams) = input_qparams.filter(|qparams| !qparams.is_empty()) {
                     if survivor.meta.input_qparams().is_some() {
                         survivor.meta.set_input_qparams(qparams);

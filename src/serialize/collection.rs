@@ -5,11 +5,11 @@ use crate::graph::Graph;
 use crate::store::TensorStore;
 
 use super::constant_pool::ConstantPool;
-use super::tensor_layout::TensorDeclarationContext;
+use super::tensor_decl;
 use super::tosa_types::{
     Attribute, ConstShapeAttribute, Op, ReshapeAttribute, TosaOperator, TosaShape, TosaTensor,
 };
-use super::{output_layout, tosa_types, visitors};
+use super::{op_semantics, tosa_types, visitors};
 
 pub(super) struct SerializedGraphItems {
     pub(super) tensors: Vec<TosaTensor>,
@@ -39,21 +39,36 @@ fn collect_region(
     graph: &Graph,
     store: &TensorStore,
 ) -> Result<SerializedRegion, String> {
-    // Region outputs are only true external program outputs on the root graph.
-    // Control-flow subgraphs feed COND_IF/WHILE_LOOP directly and must retain
-    // their internal layout instead of normalizing back to user-facing shape.
-    let normalize_outputs = name == "main";
     Ok(SerializedRegion {
         name: name.to_string(),
-        items: collect_graph_items(name, graph, store, normalize_outputs)?,
+        items: collect_graph_items(name, graph, store)?,
     })
+}
+
+/// The names of the tensors a region returns. IrNormalizeDelegateIOLayout owns the
+/// delegate boundary's layout, so each output is the node's own tensor (P2 design G4).
+fn append_output_names(graph: &Graph, arg: &Arg, output_names: &mut Vec<String>) {
+    match arg {
+        Arg::Node(id) => {
+            if let Some(node) = graph.node(*id) {
+                output_names.push(node.name.clone());
+            }
+        }
+        Arg::NodeList(ids) => {
+            for id in ids {
+                if let Some(node) = graph.node(*id) {
+                    output_names.push(node.name.clone());
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn collect_graph_items(
     region: &str,
     graph: &Graph,
     store: &TensorStore,
-    normalize_outputs: bool,
 ) -> Result<SerializedGraphItems, String> {
     let debug = crate::config::retab_debug_enabled();
     let sorted = graph.all_node_ids();
@@ -61,8 +76,10 @@ fn collect_graph_items(
         eprintln!("[Serialize] using insertion order, {} nodes", sorted.len());
         validate_insertion_order(graph, &sorted);
     }
-
-    let tensor_decls = TensorDeclarationContext::new(graph);
+    reject_aten_spatial_ops(region, graph)?;
+    if debug {
+        check_layout_invariants(region, graph, store)?;
+    }
 
     let mut tensors: Vec<TosaTensor> = Vec::new();
     let mut shapes: Vec<TosaShape> = Vec::new();
@@ -90,7 +107,7 @@ fn collect_graph_items(
                 let name = &node.name;
 
                 if let Some(tensor_data) = store.get(name) {
-                    tensors.push(tensor_decls.const_placeholder(node, tensor_data));
+                    tensors.push(tensor_decl::const_placeholder(node, tensor_data));
                     operators.push(TosaOperator::new(
                         tosa_types::Op::Const,
                         Attribute::Const(tosa_types::ConstAttribute {}),
@@ -98,7 +115,7 @@ fn collect_graph_items(
                         vec![name.clone()],
                     ));
                 } else {
-                    tensors.push(tensor_decls.runtime_placeholder(node));
+                    tensors.push(tensor_decl::runtime_placeholder(node));
                     input_names.push(name.clone());
                 }
             }
@@ -126,18 +143,7 @@ fn collect_graph_items(
             }
             OpType::Output => {
                 for arg in &node.args {
-                    if normalize_outputs {
-                        output_layout::append_normalized_output_names(
-                            graph,
-                            store,
-                            arg,
-                            &mut tensors,
-                            &mut operators,
-                            &mut output_names,
-                        );
-                    } else {
-                        output_layout::append_output_names(graph, arg, &mut output_names);
-                    }
+                    append_output_names(graph, arg, &mut output_names);
                 }
             }
         }
@@ -155,16 +161,6 @@ fn collect_graph_items(
         }
     }
 
-    let simplified = super::transpose_peephole::simplify_transposes(
-        &mut tensors,
-        &mut shapes,
-        &mut operators,
-        &input_names,
-        &mut output_names,
-    );
-    if debug && simplified > 0 {
-        eprintln!("[Serialize] removed or relabeled {simplified} redundant TRANSPOSE op(s)");
-    }
     match_scalar_operand_ranks(
         &mut tensors,
         &mut shapes,
@@ -247,6 +243,63 @@ fn collect_graph_items(
         input_names,
         output_names,
     })
+}
+
+/// Every aten conv, pool and upsample must have been rewritten to its TOSA op (P2 design
+/// X5, critique B11). They have no visitor, so a survivor (a rewrite declined it) sends
+/// the graph to stock, through the same seam as `control_flow::assembly`.
+fn reject_aten_spatial_ops(region: &str, graph: &Graph) -> Result<(), String> {
+    let Some(node) = graph
+        .order
+        .iter()
+        .filter_map(|&id| graph.node(id))
+        .find(|node| {
+            node.op == OpType::CallFunction && op_semantics::is_aten_spatial_layout_op(&node.target)
+        })
+    else {
+        return Ok(());
+    };
+    Err(format!(
+        "RETAB_STOCK_FALLBACK: aten spatial op not rewritten to a TOSA op: '{}' ({:?}) in \
+         region '{}'",
+        node.name, node.target, region
+    ))
+}
+
+/// Under RETAB_DEBUG (P2 design D1): a node's val is its TOSA shape, so the serializer's
+/// re-derived shape must equal the val. This catches stale vals.
+pub(super) fn check_layout_invariants(
+    region: &str,
+    graph: &Graph,
+    store: &TensorStore,
+) -> Result<(), String> {
+    let mut violations = Vec::new();
+    for node in graph.order.iter().filter_map(|&id| graph.node(id)) {
+        if node.op == OpType::Output {
+            continue;
+        }
+        let val: Vec<i32> = node
+            .meta
+            .val
+            .shape_slice()
+            .iter()
+            .map(|&dim| dim as i32)
+            .collect();
+        let actual = visitors::actual_tensor_shape(graph, store, node);
+        if actual != val {
+            violations.push(format!(
+                "'{}' ({:?}) has val {val:?} but serializes as {actual:?}",
+                node.name, node.target
+            ));
+        }
+    }
+    if violations.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "layout invariant broken in region '{region}': {}",
+        violations.join("; ")
+    ))
 }
 
 fn elementwise_data_input_count(op: Op) -> usize {
@@ -501,135 +554,7 @@ mod tests {
         crate::ingest::finalize::finalize_converted_graph(&mut converted);
         visitors::shape_utils::clear_shape_cache();
         visitors::dtype_quant::clear_dtype_cache();
-        collect_graph_items("region", &converted, &store, false).unwrap()
-    }
-
-    #[test]
-    fn fused_slice_serializes_multidimensional_starts_and_sizes_in_nhwc_order() {
-        let mut graph = IrGraph::empty();
-        let x = placeholder(&mut graph, "x", [1, 8, 10, 3], "torch.int8");
-        graph.node_mut(x).meta.set_tosa_dim_order(vec![0, 1, 2, 3]);
-        let first = call(
-            &mut graph,
-            "first",
-            "aten.slice_copy.Tensor",
-            vec![IrArg::Node(x), IrArg::Int(2), IrArg::Int(1), IrArg::Int(7)],
-            [1, 3, 6, 10],
-            "torch.int8",
-        );
-        let second = call(
-            &mut graph,
-            "second",
-            "aten.slice_copy.Tensor",
-            vec![
-                IrArg::Node(first),
-                IrArg::Int(3),
-                IrArg::Int(2),
-                IrArg::Int(5),
-            ],
-            [1, 3, 6, 3],
-            "torch.int8",
-        );
-        for id in [first, second] {
-            graph.node_mut(id).meta.set_tosa_dim_order(vec![0, 2, 3, 1]);
-        }
-        output(&mut graph, second);
-        let items = lower_region(
-            &mut graph,
-            vec![
-                PipelineStep::Ir(Box::new(crate::fx_rewrite_slice_ir::IrRewriteSlicePass)),
-                PipelineStep::Ir(Box::new(
-                    crate::fx_fuse_consecutive_slices_ir::IrFuseConsecutiveSlicesPass,
-                )),
-            ],
-        );
-        let slices: Vec<_> = items
-            .operators
-            .iter()
-            .filter(|op| op.op == Op::Slice)
-            .collect();
-        assert_eq!(slices.len(), 1);
-        assert_eq!(slices[0].inputs[0], "x");
-        for (input, values) in [(1, vec![0i64, 1, 2, 0]), (2, vec![1i64, 6, 3, 3])] {
-            let shape = items
-                .shapes
-                .iter()
-                .find(|shape| shape.name == slices[0].inputs[input])
-                .unwrap();
-            assert_eq!(
-                shape.data,
-                values
-                    .into_iter()
-                    .flat_map(i64::to_le_bytes)
-                    .collect::<Vec<_>>()
-            );
-        }
-        assert_eq!(
-            items
-                .tensors
-                .iter()
-                .find(|tensor| tensor.name == "second")
-                .unwrap()
-                .shape,
-            vec![1, 6, 3, 3]
-        );
-    }
-
-    #[test]
-    fn noop_pad_removal_exposes_transpose_cleanup() {
-        let mut graph = IrGraph::empty();
-        let x = placeholder(&mut graph, "x", [2, 3], "torch.float32");
-        let first = call(
-            &mut graph,
-            "first",
-            "aten.permute_copy.default",
-            vec![IrArg::Node(x), i64_list_arg(&[1, 0])],
-            [3, 2],
-            "torch.float32",
-        );
-        let padding = graph.add_call_function(
-            "padding",
-            "backend.tosa.CONST_SHAPE.default",
-            vec![i64_list_arg(&[0, 0, 0, 0])],
-            crate::fx_ir::NodeMeta::default(),
-        );
-        let padded = call(
-            &mut graph,
-            "padded",
-            "backend.tosa.PAD.default",
-            vec![IrArg::Node(first), IrArg::Node(padding)],
-            [3, 2],
-            "torch.float32",
-        );
-        let second = call(
-            &mut graph,
-            "second",
-            "aten.permute_copy.default",
-            vec![IrArg::Node(padded), i64_list_arg(&[1, 0])],
-            [2, 3],
-            "torch.float32",
-        );
-        let neg = call(
-            &mut graph,
-            "neg",
-            "aten.neg.default",
-            vec![IrArg::Node(second)],
-            [2, 3],
-            "torch.float32",
-        );
-        output(&mut graph, neg);
-        let items = lower_region(
-            &mut graph,
-            vec![PipelineStep::Ir(Box::new(
-                crate::fx_remove_noop_ir::IrRemoveNoopPass,
-            ))],
-        );
-        assert!(items
-            .operators
-            .iter()
-            .all(|op| !matches!(op.op, Op::Pad | Op::Transpose)));
-        assert_eq!(items.output_names, vec!["neg"]);
-        assert_eq!(items.operators.last().unwrap().inputs[0], "x");
+        collect_graph_items("region", &converted, &store).unwrap()
     }
 
     #[test]
@@ -804,7 +729,7 @@ mod tests {
             NodeMeta::new(TensorInfo::new(&[], DType::Int32)),
             "select".into(),
         );
-        let error = collect_graph_items("cond", &graph, &TensorStore::new(), false)
+        let error = collect_graph_items("cond", &graph, &TensorStore::new())
             .err()
             .unwrap();
         assert_eq!(
@@ -1316,7 +1241,7 @@ mod tests {
                     );
                 }
                 assert_eq!(
-                    collect_graph_items("branch", &graph, &store, false).err(),
+                    collect_graph_items("branch", &graph, &store).err(),
                     Some(format!(
                         "TOSA INT profile does not support {name} tensor 'x' in region 'branch'"
                     )),
@@ -1336,7 +1261,7 @@ mod tests {
             NodeMeta::new(TensorInfo::new(&[1], DType::Float32)),
             "x".into(),
         );
-        assert!(collect_graph_items("main", &graph, &TensorStore::new(), false).is_ok());
+        assert!(collect_graph_items("main", &graph, &TensorStore::new()).is_ok());
     }
 
     #[test]
@@ -1367,7 +1292,7 @@ mod tests {
             NodeMeta::new(TensorInfo::new(&[2], DType::Float32)),
             "dq".into(),
         );
-        let error = collect_graph_items("main", &graph, &TensorStore::new(), true)
+        let error = collect_graph_items("main", &graph, &TensorStore::new())
             .err()
             .unwrap();
         assert!(error.contains("TOSA INT profile does not support FP32 tensor 'dq_cast'"));
@@ -1462,7 +1387,7 @@ mod tests {
                 visitors::actual_tensor_shape(&graph, &store, graph.node(input).unwrap())
                     .is_empty()
             );
-            let items = collect_graph_items("main", &graph, &TensorStore::new(), false).unwrap();
+            let items = collect_graph_items("main", &graph, &TensorStore::new()).unwrap();
             let shape = |name: &str| {
                 &items
                     .tensors
@@ -1533,7 +1458,7 @@ mod tests {
                 "argmax".into(),
             );
             assert_eq!(
-                collect_graph_items("branch", &graph, &TensorStore::new(), false).err(),
+                collect_graph_items("branch", &graph, &TensorStore::new()).err(),
                 Some("argmax node 'argmax' in region 'branch' requires an explicit dim".into())
             );
         }
@@ -1559,7 +1484,7 @@ mod tests {
                 NodeMeta::new(TensorInfo::new(&[1], DType::Int32)),
                 "unknown".to_string(),
             );
-            let result = collect_graph_items("main", &graph, &TensorStore::new(), true);
+            let result = collect_graph_items("main", &graph, &TensorStore::new());
             assert_eq!(
                 result.err(),
                 Some(format!(

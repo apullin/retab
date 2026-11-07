@@ -67,6 +67,9 @@ pub(crate) fn normalize_fx_target(raw: &str) -> String {
 }
 
 /// A node in the Rust IR graph.
+///
+/// `IrGraph` indexes the node references in `args` and `kwargs`. Change them through
+/// the graph's methods, or call `IrGraph::sync_node_users` after editing them in place.
 #[derive(Debug, Clone)]
 pub struct IrNode {
     pub id: NodeId,
@@ -375,6 +378,9 @@ fn collect_users_from_arg(arg: &IrArg, user_id: NodeId, users: &mut [Vec<NodeId>
     }
 }
 
+/// From-scratch reverse edges: `users[x]` lists each live node whose args or kwargs
+/// reference `x` at any list depth, once, in ascending id order. References to ids
+/// at or past `nodes.len()` are skipped.
 fn build_user_edges(nodes: &[IrNode]) -> Vec<Vec<NodeId>> {
     let mut users = vec![Vec::new(); nodes.len()];
     for node in nodes {
@@ -391,13 +397,63 @@ fn build_user_edges(nodes: &[IrNode]) -> Vec<Vec<NodeId>> {
     users
 }
 
+/// The node ids `node` references in its args and kwargs, ascending and deduplicated.
+/// Dead nodes reference nothing, matching `build_user_edges`.
+fn node_operands(node: &IrNode) -> Vec<NodeId> {
+    let mut operands = Vec::new();
+    if node.alive {
+        for arg in node.args.iter().chain(node.kwargs.values()) {
+            arg.collect_node_ids(&mut operands);
+        }
+        operands.sort_unstable();
+        operands.dedup();
+    }
+    operands
+}
+
+fn insert_sorted(list: &mut Vec<NodeId>, id: NodeId) {
+    if let Err(position) = list.binary_search(&id) {
+        list.insert(position, id);
+    }
+}
+
+fn remove_sorted(list: &mut Vec<NodeId>, id: NodeId) {
+    if let Ok(position) = list.binary_search(&id) {
+        list.remove(position);
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test builds check the incremental user index after every edit. Benchmarks on
+    /// large graphs switch this off.
+    static CHECK_USERS_AFTER_EDIT: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// Switch the per-edit user-index check on or off for this thread; timing and
+/// scaling tests on large graphs outside this module turn it off. Returns the
+/// old setting.
+#[cfg(test)]
+pub(crate) fn set_check_users_after_edit(enabled: bool) -> bool {
+    CHECK_USERS_AFTER_EDIT.with(|check| check.replace(enabled))
+}
+
 /// The full graph: ordered list of nodes + lookup by name.
 #[derive(Debug)]
 pub struct IrGraph {
     pub nodes: Vec<IrNode>,
     name_to_id: HashMap<String, NodeId>,
-    /// Reverse edges: users[node_id] = list of node IDs that reference this node in their args.
+    /// Exact reverse edges, updated by every edit: `users[x]` lists each live node whose
+    /// args or kwargs reference `x` at any list depth, once, in ascending id order. It
+    /// always equals `build_user_edges(&nodes)`.
     users: Vec<Vec<NodeId>>,
+    /// `operands[u]`: the ids `u` references, ascending and deduplicated, as recorded in
+    /// `users` (empty while `u` is dead). An edit to `u` diffs against it and touches
+    /// only the lists that change.
+    operands: Vec<Vec<NodeId>>,
+    /// Users of ids at or past `nodes.len()` (forward references). `add_node` adopts
+    /// them, so `users` keeps matching a from-scratch rebuild.
+    pending_users: HashMap<NodeId, Vec<NodeId>>,
     /// Replacement map: dead_id → replacement_id (recorded by replace_and_erase).
     replacements: HashMap<NodeId, NodeId>,
     /// Explicit position anchors retained for IR ordering and serialization hints.
@@ -446,6 +502,8 @@ impl IrGraph {
             nodes: Vec::new(),
             name_to_id: HashMap::new(),
             users: Vec::new(),
+            operands: Vec::new(),
+            pending_users: HashMap::new(),
             replacements: HashMap::new(),
             anchors: HashMap::new(),
             anchors_after: HashMap::new(),
@@ -498,19 +556,26 @@ impl IrGraph {
             .map(|(id, py_node)| import_fx_node(id, py_node, &name_to_id, &tensor_import))
             .collect::<PyResult<Vec<_>>>()?;
 
-        let users = build_user_edges(&nodes);
-
-        Ok(Self {
+        let mut graph = Self {
             nodes,
             name_to_id,
-            users,
+            users: Vec::new(),
+            operands: Vec::new(),
+            pending_users: HashMap::new(),
             replacements: HashMap::new(),
             anchors: HashMap::new(),
             anchors_after: HashMap::new(),
-        })
+        };
+        graph.rebuild_users();
+        Ok(graph)
     }
 
     /// Iterate placeholders.
+    /// Whether a node, live or erased, already has `name`.
+    pub(crate) fn contains_name(&self, name: &str) -> bool {
+        self.name_to_id.contains_key(name)
+    }
+
     pub fn placeholders(&self) -> impl Iterator<Item = &IrNode> {
         self.nodes.iter().filter(|n| n.op == NodeOp::Placeholder)
     }
@@ -529,15 +594,17 @@ impl IrGraph {
         &self.nodes[id]
     }
 
-    /// Get mutable node by ID.
+    /// Get mutable node by ID. After changing the node references in its `args` or
+    /// `kwargs` through this, call `sync_node_users(id)`.
     pub fn node_mut(&mut self, id: NodeId) -> &mut IrNode {
         &mut self.nodes[id]
     }
 
-    /// Update a node's args and rebuild reverse-use lists.
+    /// Update a node's args and their reverse-use entries.
     pub fn set_args(&mut self, id: NodeId, args: Vec<IrArg>) {
         self.nodes[id].args = args;
-        self.rebuild_users();
+        self.sync_operands(id);
+        self.check_users_after_edit();
     }
 
     /// Add a node with kwargs (e.g. dtype for _to_copy).
@@ -552,6 +619,8 @@ impl IrGraph {
     ) -> NodeId {
         let id = self.add_node(op, name, target, args, meta);
         self.nodes[id].kwargs = kwargs;
+        self.sync_operands(id);
+        self.check_users_after_edit();
         id
     }
 
@@ -717,22 +786,44 @@ impl IrGraph {
         )
     }
 
-    /// Update a single arg by index and mark dirty.
+    /// Update a single arg by index. An out-of-range index is ignored.
     pub fn set_arg(&mut self, id: NodeId, index: usize, value: IrArg) {
         if index < self.nodes[id].args.len() {
             self.nodes[id].args[index] = value;
-            self.rebuild_users();
+            self.sync_operands(id);
+            self.check_users_after_edit();
         }
     }
 
     /// Update a kwarg.
     pub fn set_kwarg(&mut self, id: NodeId, key: impl Into<String>, value: IrArg) {
         self.nodes[id].kwargs.insert(key.into(), value);
+        self.sync_operands(id);
+        self.check_users_after_edit();
     }
 
-    /// Get users (nodes that reference this node in their args).
+    /// Remove a kwarg, returning its value.
+    pub(crate) fn remove_kwarg(&mut self, id: NodeId, key: &str) -> Option<IrArg> {
+        let removed = self.nodes[id].kwargs.remove(key);
+        self.sync_operands(id);
+        self.check_users_after_edit();
+        removed
+    }
+
+    /// Re-record `id`'s node references after its `args` or `kwargs` were edited in
+    /// place through `node_mut`. O(references of `id`).
+    pub(crate) fn sync_node_users(&mut self, id: NodeId) {
+        self.sync_operands(id);
+        self.check_users_after_edit();
+    }
+
+    /// Every live node that references `id` in its args or kwargs, once each, in
+    /// ascending id order.
     pub fn users(&self, id: NodeId) -> &[NodeId] {
-        &self.users[id]
+        match self.users.get(id) {
+            Some(users) => users,
+            None => self.pending_users.get(&id).map_or(&[], Vec::as_slice),
+        }
     }
 
     pub fn live_nodes(&self) -> impl Iterator<Item = &IrNode> {
@@ -743,14 +834,10 @@ impl IrGraph {
         self.live_nodes().count()
     }
 
+    /// [`Self::users`] as an owned Vec, for a caller that edits the graph while it
+    /// walks them. O(users of `id`).
     pub fn live_user_ids(&self, id: NodeId) -> Vec<NodeId> {
-        self.live_nodes()
-            .filter(|node| {
-                node.args.iter().any(|arg| arg.contains_node(id))
-                    || node.kwargs.values().any(|arg| arg.contains_node(id))
-            })
-            .map(|node| node.id)
-            .collect()
+        self.users(id).to_vec()
     }
 
     pub fn live_node_ids(&self) -> Vec<NodeId> {
@@ -795,6 +882,121 @@ impl IrGraph {
         result
     }
 
+    /// Renumber the nodes so that `order`, which lists every live node once,
+    /// becomes the node-vector order. A fresh `from_fx_with_tensors` graph has
+    /// this shape (ids in FX node order), and when `order` is topological both
+    /// `topological_live_node_ids` and `ingest::from_ir`, which seeds its
+    /// def-use sort with id order, then emit the live nodes in `order`. Node
+    /// references, user lists, the name index and the replacement map are
+    /// rewritten; the position anchors are dropped because `order` already
+    /// places every node. Returns the old-to-new id map.
+    ///
+    /// Dead nodes keep their old relative order. A dead placeholder stays
+    /// among the placeholders, directly after the live placeholder it followed
+    /// (or before the first one if none did), because `placeholders()` lists
+    /// dead placeholders too and region code indexes placeholders by position
+    /// (`IrInsertCarriedOutputRescalePass` pairs while-body placeholders with
+    /// the loop-carried outputs). Every other dead node follows the live ones.
+    pub(crate) fn reorder_nodes(&mut self, order: &[NodeId]) -> Vec<NodeId> {
+        fn remap(arg: &mut IrArg, new_ids: &[NodeId]) {
+            match arg {
+                IrArg::Node(id) => {
+                    if let Some(&new_id) = new_ids.get(*id) {
+                        *id = new_id;
+                    }
+                }
+                IrArg::List(items) => {
+                    for item in items {
+                        remap(item, new_ids);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut listed = vec![false; self.nodes.len()];
+        for &id in order {
+            assert!(
+                self.nodes[id].alive && !listed[id],
+                "reorder_nodes: node {id} is dead or listed twice"
+            );
+            listed[id] = true;
+        }
+        for node in &self.nodes {
+            assert!(
+                listed[node.id] || !node.alive,
+                "reorder_nodes: live node {} is missing from the order",
+                node.id
+            );
+        }
+
+        // Each dead placeholder rides behind the live placeholder before it in
+        // id order; the ones before every live placeholder ride ahead of the
+        // first.
+        let mut leading_dead = Vec::new();
+        let mut dead_after: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        let (mut first_live, mut last_live) = (None, None);
+        for node in self
+            .nodes
+            .iter()
+            .filter(|node| node.op == NodeOp::Placeholder)
+        {
+            match (node.alive, last_live) {
+                (true, _) => {
+                    first_live.get_or_insert(node.id);
+                    last_live = Some(node.id);
+                }
+                (false, Some(live)) => dead_after.entry(live).or_default().push(node.id),
+                (false, None) => leading_dead.push(node.id),
+            }
+        }
+        let mut sequence = Vec::with_capacity(self.nodes.len());
+        for &id in order {
+            if Some(id) == first_live {
+                sequence.append(&mut leading_dead);
+            }
+            sequence.push(id);
+            if let Some(dead) = dead_after.remove(&id) {
+                sequence.extend(dead);
+            }
+        }
+        // Without a live placeholder the dead ones lead the dead nodes.
+        sequence.append(&mut leading_dead);
+        sequence.extend(
+            self.nodes
+                .iter()
+                .filter(|node| !node.alive && node.op != NodeOp::Placeholder)
+                .map(|node| node.id),
+        );
+        debug_assert_eq!(sequence.len(), self.nodes.len());
+        let mut new_ids = vec![0; self.nodes.len()];
+        for (new_id, &id) in sequence.iter().enumerate() {
+            new_ids[id] = new_id;
+        }
+
+        let mut nodes = std::mem::take(&mut self.nodes);
+        nodes.sort_unstable_by_key(|node| new_ids[node.id]);
+        for node in &mut nodes {
+            node.id = new_ids[node.id];
+            for arg in node.args.iter_mut().chain(node.kwargs.values_mut()) {
+                remap(arg, &new_ids);
+            }
+        }
+        self.nodes = nodes;
+        for id in self.name_to_id.values_mut() {
+            *id = new_ids[*id];
+        }
+        self.replacements = self
+            .replacements
+            .drain()
+            .map(|(dead, replacement)| (new_ids[dead], new_ids[replacement]))
+            .collect();
+        self.anchors.clear();
+        self.anchors_after.clear();
+        self.rebuild_users();
+        new_ids
+    }
+
     pub(crate) fn constant_shape(&self, arg: &IrArg) -> Option<Vec<i64>> {
         if let IrArg::Node(id) = arg {
             let node = self.node(*id);
@@ -813,85 +1015,12 @@ impl IrGraph {
         }
     }
 
-    pub(crate) fn shape_in_node_order(
-        &self,
-        node: NodeId,
-        input: NodeId,
-        shape: &[i64],
-    ) -> Option<Vec<i64>> {
-        let input_order = self.node(input).meta.tosa_dim_order();
-        let output_order = self.node(node).meta.tosa_dim_order().or(input_order);
-        let physical = if let Some(order) = input_order {
-            if order.len() != shape.len() {
-                return None;
-            }
-            order
-                .iter()
-                .map(|&axis| shape.get(axis).copied())
-                .collect::<Option<Vec<_>>>()?
-        } else {
-            shape.to_vec()
-        };
-        let mut logical = physical.clone();
-        if let Some(order) = output_order {
-            if order.len() != shape.len() {
-                return None;
-            }
-            for (index, &axis) in order.iter().enumerate() {
-                *logical.get_mut(axis)? = physical[index];
-            }
-        }
-        Some(logical)
-    }
-
-    pub(crate) fn logical_input_shape(&self, node: NodeId, input: NodeId) -> Option<Vec<i64>> {
-        let mut current = input;
-        let mut permutations = Vec::new();
-        while crate::fx_target::is_tosa_transpose_target(&self.node(current).target)
-            || crate::fx_target::is_permute_target(&self.node(current).target)
-        {
-            permutations.push(self.node(current).arg_int_list(1)?);
-            current = self.node(current).arg_node(0)?;
-        }
-        let mut physical = self.node_shape_vec(current)?;
-        if let Some(order) = self.node(current).meta.tosa_dim_order() {
-            if order.len() != physical.len() {
-                return None;
-            }
-            physical = order
-                .iter()
-                .map(|&axis| physical.get(axis).copied())
-                .collect::<Option<Vec<_>>>()?;
-        }
-        // A generated transpose's val and dim-order metadata both describe
-        // its layout; derive its physical shape from the operand and perms.
-        for permutation in permutations.into_iter().rev() {
-            if permutation.len() != physical.len() {
-                return None;
-            }
-            physical = permutation
-                .into_iter()
-                .map(|axis| normalize_dim(axis, physical.len()).map(|axis| physical[axis]))
-                .collect::<Option<Vec<_>>>()?;
-        }
-        let mut logical = physical.clone();
-        if let Some(order) = self
-            .node(node)
-            .meta
-            .tosa_dim_order()
-            .or(self.node(input).meta.tosa_dim_order())
-        {
-            if order.len() != physical.len() {
-                return None;
-            }
-            for (index, &axis) in order.iter().enumerate() {
-                *logical.get_mut(axis)? = physical[index];
-            }
-        }
-        Some(logical)
-    }
-
     pub(crate) fn eliminate_dead_code(&mut self) -> bool {
+        self.eliminate_dead_code_keeping(|_| false)
+    }
+
+    /// `eliminate_dead_code`, with the live nodes `keep` accepts as extra roots.
+    pub(crate) fn eliminate_dead_code_keeping(&mut self, keep: impl Fn(&IrNode) -> bool) -> bool {
         let mut reachable = vec![false; self.nodes.len()];
         let mut stack: Vec<_> = self
             .live_nodes()
@@ -899,7 +1028,7 @@ impl IrGraph {
                 matches!(
                     node.op,
                     NodeOp::Placeholder | NodeOp::Output | NodeOp::Other
-                )
+                ) || keep(node)
             })
             .map(|node| node.id)
             .collect();
@@ -916,15 +1045,19 @@ impl IrGraph {
                 arg.collect_node_ids(&mut stack);
             }
         }
-        let mut modified = false;
+        let mut erased = Vec::new();
         for node in &mut self.nodes {
             if node.alive && !reachable[node.id] {
                 node.alive = false;
-                modified = true;
+                erased.push(node.id);
             }
         }
+        for &id in &erased {
+            self.sync_operands(id);
+        }
+        let modified = !erased.is_empty();
         if modified {
-            self.rebuild_users();
+            self.check_users_after_edit();
         }
         modified
     }
@@ -954,6 +1087,14 @@ impl IrGraph {
             .collect()
     }
 
+    /// The names of [`Self::live_placeholder_ids`], in the same order.
+    pub fn live_placeholder_names(&self) -> Vec<String> {
+        self.live_nodes()
+            .filter(|node| node.op == NodeOp::Placeholder)
+            .map(|node| node.name.clone())
+            .collect()
+    }
+
     pub fn live_output_ids(&self) -> Vec<NodeId> {
         self.live_nodes()
             .filter(|node| node.op == NodeOp::Output)
@@ -962,23 +1103,30 @@ impl IrGraph {
     }
 
     pub fn has_live_users(&self, id: NodeId) -> bool {
-        !self.live_user_ids(id).is_empty()
+        !self.users(id).is_empty()
     }
 
     pub fn single_live_user(&self, id: NodeId) -> Option<NodeId> {
-        let users = self.live_user_ids(id);
-        (users.len() == 1).then(|| users[0])
+        match self.users(id) {
+            [user] => Some(*user),
+            _ => None,
+        }
     }
 
     pub fn live_call_function_users(&self, id: NodeId) -> Vec<NodeId> {
-        self.live_user_ids(id)
-            .into_iter()
+        self.users(id)
+            .iter()
+            .copied()
             .filter(|&user_id| self.nodes[user_id].op == NodeOp::CallFunction)
             .collect()
     }
 
+    /// Live getitem nodes whose first arg is `id`, in ascending id order, with their
+    /// index arg (default 0).
     pub fn live_getitem_users(&self, id: NodeId) -> Vec<(NodeId, i64)> {
-        self.live_nodes()
+        self.users(id)
+            .iter()
+            .map(|&user_id| &self.nodes[user_id])
             .filter(|node| node.is_getitem())
             .filter(|node| node.first_node_arg() == Some(id))
             .map(|node| (node.id, node.arg_int_or(1, 0)))
@@ -1005,75 +1153,37 @@ impl IrGraph {
 
     /// Replace all references to `old_id` with `new_id` in args across the graph.
     pub fn replace_all_uses(&mut self, old_id: NodeId, new_id: NodeId) {
-        fn replace_in_arg(arg: &mut IrArg, old: NodeId, new: NodeId) -> bool {
-            match arg {
-                IrArg::Node(id) if *id == old => {
-                    *id = new;
-                    true
-                }
-                IrArg::List(items) => {
-                    let mut changed = false;
-                    for item in items {
-                        changed |= replace_in_arg(item, old, new);
-                    }
-                    changed
-                }
-                _ => false,
+        // Every live node that references `old_id` is in its user list.
+        let rewired = self.users[old_id].clone();
+        if old_id == new_id {
+            return;
+        }
+        for &user_id in &rewired {
+            let node = &mut self.nodes[user_id];
+            for arg in node.args.iter_mut().chain(node.kwargs.values_mut()) {
+                replace_node_in_arg(arg, old_id, new_id);
             }
         }
-        for node in &mut self.nodes {
-            if !node.alive {
-                continue;
-            }
-            for arg in &mut node.args {
-                replace_in_arg(arg, old_id, new_id);
-            }
-            for arg in node.kwargs.values_mut() {
-                replace_in_arg(arg, old_id, new_id);
-            }
+        for &user_id in &rewired {
+            self.sync_operands(user_id);
         }
-        // Update users: move old's users to new
-        let old_users = std::mem::take(&mut self.users[old_id]);
-        for &user_id in &old_users {
-            if !self.users[new_id].contains(&user_id) {
-                self.users[new_id].push(user_id);
-            }
-        }
+        self.check_users_after_edit();
     }
 
     /// Replace uses of `old_id` with `new_id` in a single user node.
     pub fn replace_input_use(&mut self, user_id: NodeId, old_id: NodeId, new_id: NodeId) -> bool {
-        fn replace_in_arg(arg: &mut IrArg, old: NodeId, new: NodeId) -> bool {
-            match arg {
-                IrArg::Node(id) if *id == old => {
-                    *id = new;
-                    true
-                }
-                IrArg::List(items) => {
-                    let mut changed = false;
-                    for item in items {
-                        changed |= replace_in_arg(item, old, new);
-                    }
-                    changed
-                }
-                _ => false,
-            }
-        }
-
         let mut changed = false;
         if let Some(node) = self.nodes.get_mut(user_id) {
             if !node.alive {
                 return false;
             }
-            for arg in &mut node.args {
-                changed |= replace_in_arg(arg, old_id, new_id);
-            }
-            for arg in node.kwargs.values_mut() {
-                changed |= replace_in_arg(arg, old_id, new_id);
+            for arg in node.args.iter_mut().chain(node.kwargs.values_mut()) {
+                changed |= replace_node_in_arg(arg, old_id, new_id);
             }
         }
         if changed {
-            self.rebuild_users();
+            self.sync_operands(user_id);
+            self.check_users_after_edit();
         }
         changed
     }
@@ -1098,6 +1208,8 @@ impl IrGraph {
     /// Mark a node as dead. Conversion and structural rebuilds skip dead nodes.
     pub fn erase(&mut self, id: NodeId) {
         self.nodes[id].alive = false;
+        self.sync_operands(id);
+        self.check_users_after_edit();
     }
 
     /// Replace all uses of `old_id` with `new_id`, then erase `old_id`.
@@ -1128,10 +1240,6 @@ impl IrGraph {
         meta: NodeMeta,
     ) -> NodeId {
         let id = self.nodes.len();
-        for arg in &args {
-            collect_users_from_arg(arg, id, &mut self.users);
-        }
-        self.users.push(Vec::new());
         self.name_to_id.insert(name.clone(), id);
         self.nodes.push(IrNode {
             id,
@@ -1144,11 +1252,144 @@ impl IrGraph {
             tensor: None,
             alive: true,
         });
+        self.users
+            .push(self.pending_users.remove(&id).unwrap_or_default());
+        self.operands.push(Vec::new());
+        self.sync_operands(id);
+        self.check_users_after_edit();
         id
     }
 
-    fn rebuild_users(&mut self) {
+    /// Add a constant: a placeholder or get_attr node without arguments that
+    /// carries its data in `IrNode::tensor`, as imported parameters and
+    /// captured_conv's constants do. Appended like `add_node`.
+    pub(crate) fn add_constant_node(
+        &mut self,
+        op: NodeOp,
+        name: String,
+        target: String,
+        tensor: NodeTensor,
+        meta: NodeMeta,
+    ) -> NodeId {
+        debug_assert!(
+            matches!(op, NodeOp::Placeholder | NodeOp::GetAttr),
+            "a constant is a placeholder or get_attr node, not {op:?}"
+        );
+        let id = self.add_node(op, name, target, Vec::new(), meta);
+        self.nodes[id].tensor = Some(tensor);
+        id
+    }
+
+    /// Recompute every user list from scratch in O(nodes + references). Edits through
+    /// the graph methods keep the lists current; this is for bulk in-place edits.
+    pub(crate) fn rebuild_users(&mut self) {
         self.users = build_user_edges(&self.nodes);
+        self.operands = self.nodes.iter().map(node_operands).collect();
+        self.pending_users.clear();
+        for (user_id, operands) in self.operands.iter().enumerate() {
+            for &operand in operands
+                .iter()
+                .filter(|&&operand| operand >= self.nodes.len())
+            {
+                self.pending_users.entry(operand).or_default().push(user_id);
+            }
+        }
+        self.check_users_after_edit();
+    }
+
+    /// Bring the user lists in line with `id`'s current args and kwargs (none if `id` is
+    /// dead), touching only the lists of operands that were added or dropped.
+    fn sync_operands(&mut self, id: NodeId) {
+        let current = node_operands(&self.nodes[id]);
+        let recorded = std::mem::take(&mut self.operands[id]);
+        for &operand in &recorded {
+            if current.binary_search(&operand).is_err() {
+                self.record_use(operand, id, false);
+            }
+        }
+        for &operand in &current {
+            if recorded.binary_search(&operand).is_err() {
+                self.record_use(operand, id, true);
+            }
+        }
+        self.operands[id] = current;
+    }
+
+    /// Add `user` to (or drop it from) the user list of `operand`.
+    fn record_use(&mut self, operand: NodeId, user: NodeId, used: bool) {
+        let Some(list) = self.users.get_mut(operand) else {
+            let pending = self.pending_users.entry(operand).or_default();
+            if used {
+                insert_sorted(pending, user);
+            } else {
+                remove_sorted(pending, user);
+                if pending.is_empty() {
+                    self.pending_users.remove(&operand);
+                }
+            }
+            return;
+        };
+        if used {
+            insert_sorted(list, user);
+        } else {
+            remove_sorted(list, user);
+        }
+    }
+
+    /// Test builds check the user index against a from-scratch rebuild after each edit.
+    fn check_users_after_edit(&self) {
+        #[cfg(test)]
+        if CHECK_USERS_AFTER_EDIT.with(std::cell::Cell::get) {
+            self.assert_users_consistent();
+        }
+    }
+
+    /// Assert that the incremental user index matches a from-scratch rebuild.
+    #[cfg(test)]
+    pub(crate) fn assert_users_consistent(&self) {
+        assert_eq!(
+            self.users,
+            build_user_edges(&self.nodes),
+            "incremental user lists differ from a rebuild"
+        );
+        assert_eq!(self.operands.len(), self.nodes.len());
+        let mut pending: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for node in &self.nodes {
+            let operands = node_operands(node);
+            for &operand in operands
+                .iter()
+                .filter(|&&operand| operand >= self.nodes.len())
+            {
+                pending.entry(operand).or_default().push(node.id);
+            }
+            assert_eq!(
+                self.operands[node.id], operands,
+                "recorded operands of node {} are stale",
+                node.id
+            );
+        }
+        assert_eq!(
+            self.pending_users, pending,
+            "forward-reference users are stale"
+        );
+    }
+}
+
+/// Rewrite every reference to `old` in `arg` (at any list depth) to `new`.
+fn replace_node_in_arg(arg: &mut IrArg, old: NodeId, new: NodeId) -> bool {
+    match arg {
+        IrArg::Node(id) if *id == old => {
+            *id = new;
+            true
+        }
+        IrArg::List(items) => {
+            let mut changed = false;
+            for item in items {
+                changed |= replace_node_in_arg(item, old, new);
+            }
+            changed
+        }
+        _ => false,
     }
 }
 
@@ -1705,6 +1946,7 @@ impl IrArg {
             _ => None,
         }
     }
+    #[cfg(test)]
     pub fn contains_node(&self, target: NodeId) -> bool {
         match self {
             IrArg::Node(id) => *id == target,
@@ -1768,6 +2010,8 @@ pub fn run_ir_pipeline(
 
     let mut any_modified = false;
     let mut effects = LoweringEffectBatch::default();
+    let timing = std::env::var_os("RETAB_PASS_TIMING").is_some();
+    let mut pass_times: Vec<(String, std::time::Duration)> = Vec::new();
     let probe = crate::config::debug_node_probe();
     let probe_after = |graph: &IrGraph, pass: &str| {
         let Some(needle) = probe.as_deref() else {
@@ -1789,6 +2033,7 @@ pub fn run_ir_pipeline(
 
     for (i, step) in steps.iter().enumerate() {
         let before = graph.live_node_count();
+        let started = std::time::Instant::now();
         let (name, modified) = match step {
             PipelineStep::Ir(pass) => {
                 log_pass_start("IrPipeline", i, steps.len(), pass.name());
@@ -1804,13 +2049,36 @@ pub fn run_ir_pipeline(
                 (pass.name(), changed)
             }
         };
+        if timing {
+            pass_times.push((name.to_owned(), started.elapsed()));
+        }
         log_pass_result("IrPipeline", name, modified, before, graph.live_node_count());
         probe_after(&graph, name);
         any_modified |= modified;
     }
 
+    if timing {
+        report_pass_times(&mut pass_times, graph.live_node_count());
+    }
     (any_modified, graph, effects)
 }
+
+/// `RETAB_PASS_TIMING`: the pipeline's total and its slowest passes, on stderr.
+fn report_pass_times(pass_times: &mut [(String, std::time::Duration)], nodes: usize) {
+    let total: std::time::Duration = pass_times.iter().map(|(_, time)| *time).sum();
+    eprintln!(
+        "[RETAB][pass-timing] {} passes, {:.2} ms, {nodes} live nodes after",
+        pass_times.len(),
+        total.as_secs_f64() * 1e3
+    );
+    pass_times.sort_by_key(|(_, time)| std::cmp::Reverse(*time));
+    for (name, time) in pass_times.iter().take(15) {
+        eprintln!("[RETAB][pass-timing] {:9.2} ms  {name}", time.as_secs_f64() * 1e3);
+    }
+}
+
+#[cfg(test)]
+mod users_tests;
 
 #[cfg(test)]
 mod tests {

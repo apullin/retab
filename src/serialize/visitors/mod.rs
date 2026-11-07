@@ -15,7 +15,6 @@ mod emit_result;
 mod emitter;
 mod graph_utils;
 mod indexing;
-mod layout;
 mod math;
 mod matmul;
 mod nn;
@@ -27,7 +26,6 @@ mod tensor_ops;
 
 pub use emitter::*;
 
-use super::tensor_layout::{apply_tosa_dim_order, permute_shape};
 use super::tosa_types::{
     AbsAttribute, AddAttribute, ArgMaxAttribute, ArithmeticRightShiftAttribute, Attribute,
     AvgPool2dAttribute, BitwiseAndAttribute, BitwiseNotAttribute, BitwiseOrAttribute,
@@ -56,13 +54,12 @@ use dtype_quant::{
     compute_multiplier_and_shift_with_width, conv_accumulator_dtype, encode_zp_for_dtype,
     has_only_tosa_rescale_users, input_qparam_zero_point, input_qparam_zero_point_or_kwarg,
     ir_float_dtype_or_float32, is_float_dtype, is_narrow_float_dtype, matmul_input_dtype,
-    node_input_zero_point, node_output_dtype, node_output_zero_point, node_tensor_dtype,
-    normalize_rescale_zp, output_qparam_zero_point, passthrough_input_dtype, single_qparam,
-    tosa_dtype_storage_size, tosa_float_dtype_to_ir_or_float32,
+    node_output_dtype, node_tensor_dtype, normalize_rescale_zp, output_qparam_zero_point,
+    passthrough_input_dtype, single_qparam, tosa_dtype_storage_size,
+    tosa_float_dtype_to_ir_or_float32,
 };
 pub(crate) use emit_result::EmitResult;
 use graph_utils::*;
-use layout::*;
 use op_utils::*;
 use rounding::*;
 pub(crate) use shape_utils::actual_tensor_shape;
@@ -101,11 +98,10 @@ pub fn emit_node(
     if let Some(probe) = crate::config::debug_node_probe() {
         if node.name.contains(&probe) {
             eprintln!(
-                "[NodeProbe] serialize {} target={:?} raw_shape={:?} dim_order={:?}",
+                "[NodeProbe] serialize {} target={:?} raw_shape={:?}",
                 node.name,
                 node.target,
                 &node.meta.val.shape[..node.meta.val.shape_len as usize],
-                node.meta.tosa_dim_order,
             );
         }
     }

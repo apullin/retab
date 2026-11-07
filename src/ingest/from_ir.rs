@@ -76,11 +76,14 @@ fn graph_from_ir_ext(
             continue;
         }
         // The branch/region args of a control-flow op reference region get_attr
-        // nodes; emit them as String region names, not graph nodes.
+        // nodes; emit them as String region names, not graph nodes. A get_attr
+        // holding tensor data is a constant (a region constant, e.g. a folded
+        // cond predicate), not a region reference.
         for a in &n.args {
             if let IrArg::Node(id) = a {
                 if let Some(m) = ir.node_opt(*id) {
-                    if matches!(m.op, NodeOp::GetAttr) || m.name.contains("submodule") {
+                    let region_attr = m.op == NodeOp::GetAttr && m.tensor.is_none();
+                    if region_attr || m.name.contains("submodule") {
                         submodule_map.insert(*id, m.name.clone());
                     }
                 }
@@ -114,8 +117,9 @@ fn graph_from_ir_ext(
         let op = map_op(ir_node.op);
         let target = if op == OpType::CallFunction {
             let parsed = parse_op_target(&ir_node.target);
-            // Mirror ingest: aten.convolution with transposed=True (arg 6) is a
-            // transpose-conv, not a plain conv2d.
+            // aten.convolution with transposed=True (arg 6) is a transposed conv. No aten
+            // conv reaches an emitter, so this only names it right in the stock-fallback
+            // reason of reject_aten_spatial_ops.
             if matches!(parsed, OpTarget::Conv2d)
                 && is_raw_aten_convolution_target(&ir_node.target)
                 && matches!(ir_node.args.get(6), Some(IrArg::Bool(true)))
@@ -127,12 +131,14 @@ fn graph_from_ir_ext(
         } else {
             OpTarget::Other(ir_node.target.clone())
         };
+        let mut meta = map_meta(&ir_node.meta);
+        meta.table_rescale_split = crate::layout::pending::has_split_rescale(ir_node);
         let node = Node {
             op,
             target,
             args: SmallVec::new(),
             kwargs: Vec::new(),
-            meta: map_meta(&ir_node.meta),
+            meta,
             users: SmallVec::new(),
             name: ir_node.name.clone(),
         };
@@ -362,7 +368,9 @@ fn apply_effects_ext(
 
 /// Replace a unary math node (e.g. `tan`, `sigmoid`) with a TOSA TABLE op fed by
 /// the precomputed table constant. INT8 table -> INT8 output; INT16 -> INT32
-/// output with a trailing rescale of 2^rescale_lshift.
+/// output with a trailing rescale of 2^rescale_lshift, unless the table's RESCALE
+/// is already its own node (`NodeMeta::table_rescale_split`, `layout::pending`),
+/// where the TABLE stands alone and that node does the shift.
 fn apply_precomputed_table(
     graph: &mut Graph,
     store: &mut TensorStore,
@@ -372,14 +380,14 @@ fn apply_precomputed_table(
     let Some(&nid) = name_map.get(&e.node_name) else {
         return false;
     };
-    let (input_arg, out_shape, dim_order) = {
+    let (input_arg, out_shape, rescale_split) = {
         let Some(n) = graph.nodes.get(nid) else {
             return false;
         };
         let Some(input_arg) = n.args.first().cloned() else {
             return false;
         };
-        (input_arg, n.meta.val, n.meta.tosa_dim_order.clone())
+        (input_arg, n.meta.val, n.meta.table_rescale_split)
     };
 
     // Table constant node.
@@ -422,13 +430,12 @@ fn apply_precomputed_table(
         n.target = OpTarget::TosaTable;
         n.args = table_args;
         n.meta.val = table_val;
-        n.meta.tosa_dim_order = dim_order.clone();
     }
 
     // INT16 TABLE produces INT32; a trailing rescale by 2^rescale_lshift aligns
     // it while staying INT32. The eventual INT16 quantization is done by a
-    // downstream rescale.
-    if e.input.dtype == DType::Int16 {
+    // downstream rescale. A split table's RESCALE is already in the graph.
+    if e.input.dtype == DType::Int16 && !rescale_split {
         let scale = 2.0_f64.powi(e.rescale_lshift as i32);
         let rescale_name = format!("{}_table_rescale", e.node_name);
         // The rescale's destination dtype is the effect's carried output dtype
@@ -444,14 +451,12 @@ fn apply_precomputed_table(
         r_args.push(Arg::Int(0));
         let mut r_val = out_shape;
         r_val.dtype = out_dtype;
-        let mut r_meta = NodeMeta::new(r_val);
-        r_meta.tosa_dim_order = dim_order;
         let r_node = Node {
             op: OpType::CallFunction,
             target: OpTarget::TosaRescale,
             args: r_args,
             kwargs: Vec::new(),
-            meta: r_meta,
+            meta: NodeMeta::new(r_val),
             users: SmallVec::new(),
             name: rescale_name.clone(),
         };
@@ -510,27 +515,36 @@ fn materialize_const(
     let Some(&nid) = name_map.get(name) else {
         return false;
     };
-    // TOSA has no int64; mirror ConvertInt64ConstOpsToInt32Pass by downcasting an
-    // int64 const to int32 when every value fits the int32 range.
-    let (data, dtype) = match (dtype, downcast_int64_le_to_int32(data)) {
-        (DType::Int64, Some(narrowed)) => (narrowed, DType::Int32),
-        _ => (data.to_vec(), dtype),
-    };
-    store.insert(
-        name.to_string(),
-        crate::store::TensorData {
-            data: data.clone(),
-            shape: shape.to_vec(),
-            dtype,
-        },
-    );
+    let tensor = materialized_tensor(data.to_vec(), shape.to_vec(), dtype);
+    let val = TensorInfo::new(&tensor.shape, tensor.dtype);
+    store.insert(name.to_string(), tensor);
     if let Some(n) = graph.nodes.get_mut(nid) {
         n.op = OpType::Placeholder;
         n.target = OpTarget::Other(name.to_string());
         n.args = SmallVec::new();
-        n.meta.val = TensorInfo::new(shape, dtype);
+        n.meta.val = val;
     }
     true
+}
+
+/// The constant a MaterializeTensorNode effect's data becomes, here and in
+/// the in-IR materialization (`layout::constants`). TOSA has no
+/// int64; mirror ConvertInt64ConstOpsToInt32Pass by downcasting an int64 const
+/// to int32 when every value fits the int32 range.
+pub(crate) fn materialized_tensor(
+    data: Vec<u8>,
+    shape: Vec<i64>,
+    dtype: DType,
+) -> crate::store::TensorData {
+    let narrowed = match dtype {
+        DType::Int64 => downcast_int64_le_to_int32(&data),
+        _ => None,
+    };
+    let (data, dtype) = match narrowed {
+        Some(narrowed) => (narrowed, DType::Int32),
+        None => (data, dtype),
+    };
+    crate::store::TensorData { data, shape, dtype }
 }
 
 /// Append stock's `_{region}` suffix to every node name and store key of a
@@ -742,7 +756,7 @@ pub fn debug_dump(graph: &Graph, label: &str) {
     for &nid in &graph.order {
         if let Some(n) = graph.nodes.get(nid) {
             eprintln!(
-                "  {:?} {} op={:?} target={:?} args={:?} val={:?}:{:?} dimorder={:?}",
+                "  {:?} {} op={:?} target={:?} args={:?} val={:?}:{:?}",
                 nid,
                 n.name,
                 n.op,
@@ -750,7 +764,6 @@ pub fn debug_dump(graph: &Graph, label: &str) {
                 n.args,
                 n.meta.val.shape_slice(),
                 n.meta.val.dtype,
-                n.meta.tosa_dim_order,
             );
         }
     }
@@ -848,14 +861,7 @@ fn map_meta(m: &IrNodeMeta) -> NodeMeta {
     let mut meta = NodeMeta::new(val);
     meta.input_qparams = qparam_entries(m.input_qparams());
     meta.output_qparams = qparam_entries(m.output_qparams());
-    meta.tosa_dim_order = m
-        .tosa_dim_order()
-        .map(|v| v.iter().map(|&x| x as u8).collect());
     meta.tosa_special_dtype = special_dtype_from_extras(m);
-    meta.arm_control_flow_parent_output_user = matches!(
-        m.extras.get("arm_control_flow_parent_output_user"),
-        Some(MetaValue::Bool(true))
-    );
     meta
 }
 
@@ -1126,5 +1132,93 @@ mod tests {
         let rescale_id = node_id_by_name(&graph, "late_rescale");
         let user_id = node_id_by_name(&graph, "user");
         assert!(graph.nodes[rescale_id].users.contains(&user_id));
+    }
+
+    /// A cond's branch args are get_attr nodes without data and become region
+    /// names. A get_attr holding data is a constant, so a predicate folded
+    /// into one (a region constant) stays a tensor operand.
+    #[test]
+    fn a_get_attr_with_data_is_a_cond_operand_not_a_region() {
+        use crate::fx_ir::{NodeTensor, TensorSource};
+
+        let mut ir = IrGraph::empty();
+        let input = ir.add_node(
+            NodeOp::Placeholder,
+            "x".to_string(),
+            "x".to_string(),
+            vec![],
+            ir_meta(),
+        );
+        let pred = ir.add_constant_node(
+            NodeOp::GetAttr,
+            "pred_pre_computed".to_string(),
+            "pred_pre_computed".to_string(),
+            NodeTensor {
+                source: TensorSource::GraphModuleAttr,
+                data: TensorData {
+                    data: vec![1],
+                    shape: vec![],
+                    dtype: DType::Bool,
+                },
+            },
+            IrNodeMeta::tensor(Vec::<i64>::new(), "torch.bool"),
+        );
+        let branches = ["true_graph_0", "false_graph_0"].map(|name| {
+            ir.add_node(
+                NodeOp::GetAttr,
+                name.to_string(),
+                name.to_string(),
+                vec![],
+                IrNodeMeta::default(),
+            )
+        });
+        let cond = ir.add_node(
+            NodeOp::CallFunction,
+            "cond".to_string(),
+            "torch.ops.higher_order.cond".to_string(),
+            vec![
+                IrArg::Node(pred),
+                IrArg::Node(branches[0]),
+                IrArg::Node(branches[1]),
+                IrArg::List(vec![IrArg::Node(input)]),
+            ],
+            ir_meta(),
+        );
+        ir.add_node(
+            NodeOp::Output,
+            "output".to_string(),
+            "output".to_string(),
+            vec![IrArg::Node(cond)],
+            ir_meta(),
+        );
+
+        let mut store = TensorStore::new();
+        let graph = graph_from_ir_preserve_placeholders(&ir, &mut store);
+
+        let cond = &graph.nodes[node_id_by_name(&graph, "cond")];
+        assert_eq!(
+            cond.args[..3],
+            [
+                Arg::Node(node_id_by_name(&graph, "pred_pre_computed")),
+                Arg::String("true_graph_0".to_string()),
+                Arg::String("false_graph_0".to_string()),
+            ]
+        );
+        assert_eq!(
+            store.get("pred_pre_computed").map(|tensor| &tensor.data),
+            Some(&vec![1])
+        );
+        let names: Vec<&str> = graph
+            .order
+            .iter()
+            .map(|&id| graph.nodes[id].name.as_str())
+            .collect();
+        assert_eq!(names, ["x", "pred_pre_computed", "cond", "output"]);
+        let inputs: Vec<&str> = graph
+            .inputs
+            .iter()
+            .map(|&id| graph.nodes[id].name.as_str())
+            .collect();
+        assert_eq!(inputs, ["x"], "the constant is not a runtime input");
     }
 }

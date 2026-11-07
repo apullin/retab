@@ -1,6 +1,6 @@
 //! Typed FX metadata imported into the Rust lowering IR.
 //!
-//! This module owns tensor, quantization, layout, and passthrough metadata
+//! This module owns tensor (value and dim order), quantization, and passthrough metadata
 //! facts. Graph topology and rewrite mechanics live in `fx_ir`.
 
 use std::borrow::Cow;
@@ -59,6 +59,10 @@ struct QuantFacts {
     input_qparams: Option<QParamMap>,
     output_qparams: Option<QParamMap>,
     pre_pass_arg_qparams: Option<QParamMap>,
+    /// On a cond or while node: the output RESCALE targets recorded before the
+    /// layout passes, by output index
+    /// (`control_flow::IrRecordControlFlowRescaleTargetsPass`).
+    control_flow_output_targets: Option<QParamMap>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -144,22 +148,15 @@ impl IndexMut<&usize> for QParamMap {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-struct LayoutFacts {
-    val_dim_order: Option<Vec<usize>>,
-    tosa_dim_order: Option<Vec<usize>>,
-    original_dim_orders: Option<Vec<Vec<usize>>>,
-    tosa_spatial_rank: Option<usize>,
-}
-
 /// Metadata fields extracted from `node.meta`. The common fields are typed;
 /// rare fields stay in the Python meta dict and are not touched.
 #[derive(Debug, Clone, Default)]
 pub struct NodeMeta {
     tensor: Option<TensorFacts>,
     quant: QuantFacts,
-    layout: LayoutFacts,
-    /// Arbitrary extra meta keys for passthrough (skip_size_adjust, arm_constant_placeholder, etc).
+    /// torch's dim order of the value, `meta["val"].dim_order()`.
+    val_dim_order: Option<Vec<usize>>,
+    /// Arbitrary extra meta keys for passthrough (do_not_fuse_duplicate, etc).
     pub extras: HashMap<String, MetaValue>,
 }
 
@@ -240,29 +237,13 @@ impl NodeMeta {
             .as_ref()
             .and_then(|v| attrs(v).call_optional("dim_order"));
 
-        let tosa_dim_order = meta_attrs.optional("tosa_dim_order");
-
-        let original_dim_orders = meta_attrs.optional("original_dim_orders");
-
-        let tosa_spatial_rank = meta_attrs.optional("tosa_spatial_rank");
-
         let pre_pass_arg_qparams = meta_attrs
             .value("_pre_pass_arg_qparams")
             .and_then(|v| extract_qparam_dict(&v));
 
         let mut extras = HashMap::new();
-        for key in [
-            "arm_constant_placeholder",
-            "arm_control_flow_placeholder",
-            "arm_control_flow_parent_output_user",
-            "do_not_fuse_duplicate",
-        ] {
-            if let Some(b) = meta_attrs.optional::<bool>(key) {
-                extras.insert(key.into(), MetaValue::Bool(b));
-            }
-        }
-        if let Some(b) = meta_attrs.optional::<bool>("skip_size_adjust") {
-            extras.insert("skip_size_adjust".into(), MetaValue::Bool(b));
+        if let Some(b) = meta_attrs.optional::<bool>("do_not_fuse_duplicate") {
+            extras.insert("do_not_fuse_duplicate".into(), MetaValue::Bool(b));
         }
         if let Some(custom) = meta_attrs.value("custom") {
             if let Some(ann_info) = items(&custom).key("_arm_annotation_info") {
@@ -281,13 +262,9 @@ impl NodeMeta {
                 input_qparams,
                 output_qparams,
                 pre_pass_arg_qparams,
+                control_flow_output_targets: None,
             },
-            layout: LayoutFacts {
-                val_dim_order,
-                tosa_dim_order,
-                original_dim_orders,
-                tosa_spatial_rank,
-            },
+            val_dim_order,
             extras,
         })
     }
@@ -316,24 +293,13 @@ impl NodeMeta {
         self.val_dtype_or("torch.float32")
     }
 
+    #[cfg(test)]
     pub fn rank(&self) -> Option<usize> {
         self.tensor.as_ref().map(|v| v.rank())
     }
 
     pub fn val_dim_order(&self) -> Option<&[usize]> {
-        self.layout.val_dim_order.as_deref()
-    }
-
-    pub fn tosa_dim_order(&self) -> Option<&[usize]> {
-        self.layout.tosa_dim_order.as_deref()
-    }
-
-    pub fn cloned_tosa_dim_order(&self) -> Option<Vec<usize>> {
-        self.layout.tosa_dim_order.clone()
-    }
-
-    pub fn original_dim_orders(&self) -> Option<&[Vec<usize>]> {
-        self.layout.original_dim_orders.as_deref()
+        self.val_dim_order.as_deref()
     }
 
     pub fn set_output_qparams(&mut self, map: impl Into<QParamMap>) {
@@ -400,6 +366,10 @@ impl NodeMeta {
         self.quant.pre_pass_arg_qparams = Some(map.into());
     }
 
+    pub(crate) fn set_control_flow_output_targets(&mut self, map: impl Into<QParamMap>) {
+        self.quant.control_flow_output_targets = Some(map.into());
+    }
+
     pub fn clear_output_qparams(&mut self) {
         self.quant.output_qparams = None;
     }
@@ -408,38 +378,12 @@ impl NodeMeta {
         self.quant.input_qparams = None;
     }
 
-    pub fn set_tosa_dim_order(&mut self, order: Vec<usize>) {
-        self.layout.tosa_dim_order = Some(order);
-    }
-
     pub fn set_val_dim_order(&mut self, order: Vec<usize>) {
-        self.layout.val_dim_order = Some(order);
+        self.val_dim_order = Some(order);
     }
 
-    pub fn set_original_dim_orders(&mut self, orders: Vec<Vec<usize>>) {
-        self.layout.original_dim_orders = Some(orders);
-    }
-
-    pub fn set_tosa_spatial_rank(&mut self, rank: usize) -> bool {
-        if self.layout.tosa_spatial_rank == Some(rank) {
-            return false;
-        }
-        self.layout.tosa_spatial_rank = Some(rank);
-        true
-    }
-
-    pub fn tosa_spatial_rank_or(&self, default: usize) -> usize {
-        self.layout.tosa_spatial_rank.unwrap_or(default)
-    }
-
-    pub fn tosa_spatial_rank(&self) -> Option<usize> {
-        self.layout.tosa_spatial_rank
-    }
-
-    pub fn copy_dim_order_facts_from(&mut self, other: &Self) {
-        self.layout.val_dim_order = other.layout.val_dim_order.clone();
-        self.layout.tosa_dim_order = other.layout.tosa_dim_order.clone();
-        self.layout.original_dim_orders = other.layout.original_dim_orders.clone();
+    pub fn copy_val_dim_order_from(&mut self, other: &Self) {
+        self.val_dim_order = other.val_dim_order.clone();
     }
 
     pub fn tensor_facts(&self) -> Option<&TensorFacts> {
@@ -452,6 +396,13 @@ impl NodeMeta {
 
     pub fn set_val(&mut self, facts: TensorFacts) {
         self.set_tensor_facts(facts);
+    }
+
+    /// Drop the value facts and the value's dim order, for a node whose value
+    /// is not a tensor (a TOSA `CONST_SHAPE` holds an `int[]`).
+    pub fn clear_val(&mut self) {
+        self.tensor = None;
+        self.val_dim_order = None;
     }
 
     pub fn set_tensor_facts_for_existing_shape(&mut self, dtype: impl Into<String>) -> bool {
@@ -528,6 +479,10 @@ impl NodeMeta {
 
     pub fn pre_pass_arg_qparams(&self) -> Option<&QParamMap> {
         self.quant.pre_pass_arg_qparams.as_ref()
+    }
+
+    pub(crate) fn control_flow_output_targets(&self) -> Option<&QParamMap> {
+        self.quant.control_flow_output_targets.as_ref()
     }
 
     pub fn cloned_input_qparams(&self) -> Option<QParamMap> {
@@ -616,24 +571,6 @@ impl NodeMeta {
 
     pub fn clear_tosa_special_dtype(&mut self) -> bool {
         self.extras.remove("tosa_special_dtype").is_some()
-    }
-
-    pub fn replace_tosa_dim_order(&mut self, order: Option<Vec<usize>>) {
-        self.layout.tosa_dim_order = order;
-    }
-
-    pub fn clear_tosa_dim_order_if_rank_mismatch(&mut self, rank: usize) -> bool {
-        if self
-            .layout
-            .tosa_dim_order
-            .as_ref()
-            .is_some_and(|order| order.len() != rank)
-        {
-            self.layout.tosa_dim_order = None;
-            true
-        } else {
-            false
-        }
     }
 
     pub fn set_empty_qparam_maps(&mut self) {
@@ -725,14 +662,6 @@ impl<'a> TensorMetaStamp<'a> {
     pub fn empty_qparam_maps(&self, shape: impl Into<Vec<i64>>) -> NodeMeta {
         let mut meta = self.base.cloned_with_tensor_facts(self.facts(shape));
         meta.set_empty_qparam_maps();
-        meta
-    }
-
-    pub fn plain_tensor(&self, shape: impl Into<Vec<i64>>) -> NodeMeta {
-        let mut meta = self.base.cloned_with_tensor_facts(self.facts(shape));
-        meta.set_empty_input_qparams();
-        meta.clear_output_qparams();
-        meta.clear_tosa_special_dtype();
         meta
     }
 }

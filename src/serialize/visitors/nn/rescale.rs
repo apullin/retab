@@ -29,141 +29,6 @@ struct RescaleParams {
     output_unsigned: bool,
 }
 
-fn is_depthwise_aten_conv2d(graph: &Graph, store: &TensorStore, node: &Node) -> bool {
-    let groups = aten_conv_groups(node);
-    if groups <= 1 {
-        return false;
-    }
-    let Some(weight_node) = node
-        .args
-        .get(1)
-        .and_then(Arg::as_node)
-        .and_then(|id| graph.node(id))
-    else {
-        return false;
-    };
-
-    let logical_weight = weight_node.meta.val.shape_slice();
-    if logical_weight.len() >= 2 && logical_weight[1] == 1 {
-        return true;
-    }
-
-    let actual_weight = actual_tensor_shape(graph, store, weight_node);
-    actual_weight.len() == 4
-        && actual_weight.get(2).copied() == Some(groups as i32)
-        && actual_weight.get(3).copied().unwrap_or(0) > 0
-}
-
-fn rescale_input_shape(graph: &Graph, store: &TensorStore, input_node: &Node) -> Vec<i32> {
-    match input_node.target {
-        OpTarget::Conv2d if input_rank(graph, input_node) == 5 => {
-            let stride = conv_stride_arg(input_node, 3);
-            let dilation = conv_dilation_arg(input_node, 3);
-            let raw_pad = symmetric_spatial_pad(&conv_pad_arg(input_node, 3), 3);
-            let pad = adjusted_tosa_pad_for_emitted_conv3d(
-                graph, store, input_node, &raw_pad, &stride, &dilation,
-            );
-            compute_conv3d_ndhwc_output(graph, store, input_node, &pad, &stride, &dilation).shape
-        }
-        OpTarget::TosaConv3d => {
-            let stride = conv_stride_arg(input_node, 3);
-            let dilation = conv_dilation_arg(input_node, 3);
-            let raw_pad = conv_pad_arg(input_node, 6);
-            let pad = adjusted_tosa_pad_for_emitted_conv3d(
-                graph, store, input_node, &raw_pad, &stride, &dilation,
-            );
-            compute_conv3d_ndhwc_output(graph, store, input_node, &pad, &stride, &dilation).shape
-        }
-        OpTarget::Conv2d | OpTarget::TosaConv2d => {
-            let stride_for_shape = conv_stride_arg(input_node, 2);
-            let dilation_for_shape = conv_dilation_arg(input_node, 2);
-            let raw_pad = conv_pad_arg(input_node, 4);
-            let pad_for_shape = match input_node.target {
-                OpTarget::Conv2d => adjusted_tosa_pad_for_raw_aten_conv(
-                    graph,
-                    store,
-                    input_node,
-                    &raw_pad,
-                    &stride_for_shape,
-                    &dilation_for_shape,
-                    // An aten Conv2d can still be depthwise; the branch below
-                    // already relies on the same distinction.
-                    is_depthwise_aten_conv2d(graph, store, input_node),
-                ),
-                // TosaConv2d
-                _ => adjusted_tosa_pad_for_emitted_conv2d(
-                    graph,
-                    store,
-                    input_node,
-                    &raw_pad,
-                    &stride_for_shape,
-                    &dilation_for_shape,
-                    false,
-                ),
-            };
-            if matches!(input_node.target, OpTarget::Conv2d)
-                && is_depthwise_aten_conv2d(graph, store, input_node)
-            {
-                compute_depthwise_conv2d_nhwc_output(
-                    graph,
-                    store,
-                    input_node,
-                    &pad_for_shape,
-                    &stride_for_shape,
-                    &dilation_for_shape,
-                )
-                .shape
-            } else {
-                compute_conv2d_nhwc_output(
-                    graph,
-                    store,
-                    input_node,
-                    &pad_for_shape,
-                    &stride_for_shape,
-                    &dilation_for_shape,
-                )
-                .shape
-            }
-        }
-        OpTarget::DepthwiseConv2d | OpTarget::TosaDepthwiseConv2d => {
-            let stride_for_shape = conv_stride_arg(input_node, 2);
-            let dilation_for_shape = conv_dilation_arg(input_node, 2);
-            let raw_pad = conv_pad_arg(input_node, 4);
-            let pad_for_shape = match input_node.target {
-                OpTarget::DepthwiseConv2d => adjusted_tosa_pad_for_raw_aten_conv(
-                    graph,
-                    store,
-                    input_node,
-                    &raw_pad,
-                    &stride_for_shape,
-                    &dilation_for_shape,
-                    true,
-                ),
-                // TosaDepthwiseConv2d
-                _ => adjusted_tosa_pad_for_emitted_conv2d(
-                    graph,
-                    store,
-                    input_node,
-                    &raw_pad,
-                    &stride_for_shape,
-                    &dilation_for_shape,
-                    true,
-                ),
-            };
-            compute_depthwise_conv2d_nhwc_output(
-                graph,
-                store,
-                input_node,
-                &pad_for_shape,
-                &stride_for_shape,
-                &dilation_for_shape,
-            )
-            .shape
-        }
-        _ => actual_tensor_shape(graph, store, input_node),
-    }
-}
-
 fn rescale_output_dtype(node: &Node) -> DType {
     match node.args.get(1) {
         Some(Arg::Dtype(dtype)) => ir_dtype_to_tosa(*dtype),
@@ -172,7 +37,7 @@ fn rescale_output_dtype(node: &Node) -> DType {
 }
 
 fn plan_rescale_output(graph: &Graph, node: &Node, store: &TensorStore) -> RescaleOutputPlan {
-    let logical_output_shape = raw_i32_shape(node);
+    let val_shape = raw_i32_shape(node);
     let output_dtype = rescale_output_dtype(node);
     let input_tosa_dtype = first_input_node(graph, node)
         .map(|input_node| match input_node.op {
@@ -192,7 +57,8 @@ fn plan_rescale_output(graph: &Graph, node: &Node, store: &TensorStore) -> Resca
             post_reshape: None,
         };
     };
-    let input_shape = rescale_input_shape(graph, store, input_node);
+    // A TOSA conv's val is its output shape, so it isn't recomputed (P2 design G3).
+    let input_shape = actual_tensor_shape(graph, store, input_node);
 
     let Some(batched_shape) = promoted_2d_matmul_shape(graph, store, input_node) else {
         return RescaleOutputPlan {
@@ -203,11 +69,11 @@ fn plan_rescale_output(graph: &Graph, node: &Node, store: &TensorStore) -> Resca
         };
     };
 
-    if logical_output_shape.len() != 2 {
+    if val_shape.len() != 2 {
         return RescaleOutputPlan {
             input_tosa_dtype,
             output_name: node.name.clone(),
-            output_shape: logical_output_shape,
+            output_shape: val_shape,
             post_reshape: None,
         };
     }
@@ -219,7 +85,7 @@ fn plan_rescale_output(graph: &Graph, node: &Node, store: &TensorStore) -> Resca
         output_shape: batched_shape,
         post_reshape: Some(PostRescaleReshape {
             input_name: output_name,
-            output_shape: logical_output_shape,
+            output_shape: val_shape,
             output_dtype,
         }),
     }

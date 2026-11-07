@@ -199,7 +199,7 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     }
     let meta = orig_meta.tensor_stamp_same_dtype_or_float32();
-    let input_shape = match graph.logical_input_shape(id, input_id) {
+    let input_shape = match graph.node_shape_vec(input_id) {
         Some(s) => s,
         None => return false,
     };
@@ -320,7 +320,6 @@ mod tests {
         let qp = crate::test_ir::qparam(0.25, 3, "torch.int8");
         graph.node_mut(pad).meta.set_both_qparams(qp.clone());
         output(&mut graph, pad);
-        crate::fx_memory_format_ir::IrToTosaMemoryFormatPass.run(&mut graph);
         assert!(IrRewritePadPass.run(&mut graph));
         assert_eq!(graph.node(pad).arg_int_list(1), Some(vec![0, 0, 0, 0]));
         assert!(crate::fx_rewrite_slice_ir::IrRewriteSlicePass.run(&mut graph));
