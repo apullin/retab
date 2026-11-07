@@ -1,7 +1,6 @@
 """Decomposition hook installation helpers for fast_preprocess_pipeline."""
 
 import logging
-import os
 
 from torch.export.exported_program import ExportedProgram
 from executorch.exir.tracer import _default_decomposition_table
@@ -27,23 +26,14 @@ _RUN_DECOMP_DISABLE_UNLIFT_GUARDS = False
 _NN_MODULE_STACK_FAST_PATH_UNSAFE = False
 
 
-def _env_get(name: str, *aliases: str) -> str | None:
-    for candidate in (name, *aliases):
-        value = os.environ.get(candidate)
-        if value is not None:
-            return value
-    return None
-
-
 def _install_patch_once(slot: str, module, attr: str, wrap):
     if slot in _ORIGINAL_PATCHES:
         return
 
     # These are optional performance fast-paths that monkeypatch ExecuTorch/torch
-    # internals, and those internals move between ExecuTorch versions (not every
-    # TOSAPartitioner exposes `direct_lower`, for instance). The core RETAB TOSA
-    # override installs separately, so skipping an absent target costs speed but
-    # preserves correctness.
+    # internals, and those internals move between ExecuTorch and torch versions.
+    # The core RETAB TOSA override installs separately, so skipping an absent
+    # target costs speed but preserves correctness.
     original = getattr(module, attr, None)
     if original is None:
         logger.warning(
@@ -293,26 +283,11 @@ def _install_edge_decomp_fast_path() -> None:
                         final_ops_to_preserve
                     )
 
-                edge_program = program_mod._generate_edge_program(
+                edge_programs[name] = program_mod._generate_edge_program(
                     config,
                     program,
                     preserve_ops=ops_set_to_not_decompose_by_program.get(name, []),
                 )
-                if os.environ.get("ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING") == "1":
-                    try:
-                        from executorch.backends.arm.tosa.partitioner import (
-                            _sync_direct_delegate_output_meta,
-                        )
-
-                        _sync_direct_delegate_output_meta(edge_program)
-                    except Exception as exc:
-                        logger.info(
-                            "[fast_preprocess] direct delegate output-meta sync failed for %s: %s",
-                            name,
-                            exc,
-                        )
-
-                edge_programs[name] = edge_program
 
             all_ops_not_to_decompose = list(
                 set().union(*ops_set_to_not_decompose_by_program.values())
@@ -368,54 +343,6 @@ def _graph_node_count(graph_module) -> int:
         if isinstance(module, torch.fx.GraphModule):
             count += sum(1 for _ in module.graph.nodes)
     return count
-
-
-def _direct_lower_node_limit() -> int:
-    raw = _env_get(
-        "RETAB_DIRECT_LOWER_NODE_LIMIT",
-        "ARM_TOSA_ENGINE_DIRECT_LOWER_NODE_LIMIT",
-    )
-    if raw is None:
-        # Direct lowering is best for small graphs; on larger graphs it can
-        # speculatively preprocess many fragments before falling back.
-        return 128
-    try:
-        return int(raw)
-    except ValueError:
-        logger.warning(
-            "[fast_preprocess] ignoring invalid RETAB_DIRECT_LOWER_NODE_LIMIT=%r",
-            raw,
-        )
-        return 128
-
-
-def _install_direct_lower_size_guard() -> None:
-    from executorch.backends.arm.tosa.partitioner import TOSAPartitioner
-
-    def wrap_direct_lower(original):
-        if getattr(original, "__retab_patched__", False):
-            return original
-
-        def guarded_direct_lower(self, exported_program, compile_config):
-            limit = _direct_lower_node_limit()
-            if (
-                limit > 0
-                and getattr(compile_config, "_enable_direct_backend_lowering", False)
-                and _graph_node_count(exported_program.graph_module) > limit
-            ):
-                return None
-            return original(self, exported_program, compile_config)
-
-        guarded_direct_lower.__retab_patched__ = True
-        guarded_direct_lower.__wrapped__ = original
-        return guarded_direct_lower
-
-    _install_patch_once(
-        "tosa_partitioner_direct_lower",
-        TOSAPartitioner,
-        "direct_lower",
-        wrap_direct_lower,
-    )
 
 
 def _install_trace_run_decomp_fast_path_patches(
@@ -760,8 +687,6 @@ def _install_run_decomp_fast_path() -> None:
     """Trim no-op recompiles in torch export decomposition helpers."""
     global _RUN_DECOMP_DISABLE_UNLIFT_GUARDS
 
-    _install_direct_lower_size_guard()
-
     import functools
 
     import torch
@@ -829,13 +754,7 @@ def _uninstall_run_decomp_fast_path() -> None:
 
     import torch.export._trace as trace_mod
     import torch.export.exported_program as exported_program_mod
-    from executorch.backends.arm.tosa.partitioner import TOSAPartitioner
 
-    _restore_patch(
-        "tosa_partitioner_direct_lower",
-        TOSAPartitioner,
-        "direct_lower",
-    )
     _restore_patch(
         "aot_export_joint_with_descriptors",
         trace_mod,

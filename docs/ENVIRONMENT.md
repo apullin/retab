@@ -7,9 +7,8 @@ environment file automatically.
 
 ## Python runtime
 
-The `_env_get` helpers in
-[preprocess.py](../python/retab/preprocess.py) and
-[_decomp_hooks.py](../python/retab/_decomp_hooks.py) return the first defined
+The `_env_get` helper in
+[preprocess.py](../python/retab/preprocess.py) returns the first defined
 name, checking the primary name before its aliases. An empty primary value
 still overrides an alias. The effects below depend on the returned value,
 not simply on whether the variable exists.
@@ -19,8 +18,6 @@ not simply on whether the variable exists.
 | `RETAB_DUMP_TOSA` | `ARM_TOSA_ENGINE_DUMP_TOSA` | `preprocess.py`: `_maybe_dump_tosa_artifacts`, `_compile_specs_safe_for_parallel` | A nonempty value is a file path. Creates parent directories and writes the current delegate's TOSA bytes, replacing an existing file. Also forces serial backend preprocessing to avoid dump collisions. Unset/empty disables this dump. |
 | `RETAB_PARALLEL_BACKEND_PREPROCESS_WORKERS` | `ARM_TOSA_ENGINE_PARALLEL_BACKEND_PREPROCESS_WORKERS` | `preprocess.py`: `_parallel_backend_preprocess_workers`, called during installation and job scheduling | Integer worker count, default `0`. Negative and invalid values become `0`; invalid values log a warning. Values above `1` enable the experimental fork-based multi-delegate path. Debug artifacts and unavailable fork multiprocessing still cause serial execution. |
 | `RETAB_FORCE_CF_RECURSIVE_PASSES` | `ARM_TOSA_ENGINE_FORCE_CF_RECURSIVE_PASSES` | `preprocess.py`: `_run_control_flow_submodule_rust_passes` | Exactly `1` runs the full parent pass entry point on each immediate control-flow submodule before the normal named cond/while pipelines. Unset otherwise. This looks like a stale debug path; see the audit notes below. |
-| `RETAB_DIRECT_LOWER_NODE_LIMIT` | `ARM_TOSA_ENGINE_DIRECT_LOWER_NODE_LIMIT` | `_decomp_hooks.py`: `_direct_lower_node_limit`, via `_install_direct_lower_size_guard`'s wrapper | Default `128`; invalid integers warn and use `128`. A positive limit skips a direct-lowering attempt when the recursive FX node count exceeds it and the compile configuration enables direct lowering. Zero/negative disables the size guard. Dormant on stock rc4, which has no `TOSAPartitioner.direct_lower`. |
-| `ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING` | None | `_decomp_hooks.py`: optimized `_gen_edge_manager_for_partitioners` wrapper installed by `_install_edge_decomp_fast_path` | Exactly `1` attempts `_sync_direct_delegate_output_meta` after generating an edge program. Missing helpers are caught and logged. This legacy helper is absent from stock rc4, so the setting has no successful metadata-sync effect there. |
 
 [integration/executorch_arm.py](../python/retab/integration/executorch_arm.py)
 also reads, sets, and restores `RETAB_PARALLEL_BACKEND_PREPROCESS_WORKERS`
@@ -76,11 +73,6 @@ not environment configuration read by the package.
 
 ## Settings that need a separate audit
 
-- `RETAB_DIRECT_LOWER_NODE_LIMIT` and its alias are dormant on stock rc4:
-  their only consumer is a wrapper for the absent `direct_lower` method.
-- `ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING` targets an absent stock rc4
-  metadata-sync helper. It remains useful only if a compatible checkout
-  supplies that helper.
 - `RETAB_FORCE_CF_RECURSIVE_PASSES` and its alias are live reads but look
   stale. The normal path already runs named cond/while pipelines, and its
   extra `run_fx_passes` call replaces the parent `STASHED_IR` hierarchy
