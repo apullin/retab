@@ -32,8 +32,6 @@ from executorch.exir.backend.compile_spec_schema import CompileSpec
 from torch.export.exported_program import ExportedProgram
 
 from retab._decomp_hooks import (
-    _install_edge_decomp_fast_path,
-    _install_run_decomp_fast_path,
     _uninstall_edge_decomp_fast_path,
     _uninstall_run_decomp_fast_path,
 )
@@ -616,21 +614,33 @@ def _restore_ethos_u_unused_input_guard() -> None:
     EthosUBackend.preprocess = original
 
 
+_FAST_PATHS_DISABLED = (
+    "RETAB's edge-manager and run_decompositions fast paths are disabled until they "
+    "are re-derived on ExecuTorch v1.6.0-rc4: the edge-manager fast path predates rc4 "
+    "and skips its _apply_pre_decomposition_transforms (Linear APU-117). Install "
+    "RETAB without fast_paths."
+)
+
+
+def _refuse_fast_paths(fast_paths: bool) -> None:
+    """Raise, before anything is patched, when a caller asks for the fast paths."""
+    if fast_paths:
+        raise NotImplementedError(_FAST_PATHS_DISABLED)
+
+
 def patch_tosa_backend(*, fast_paths: bool = False):
     """Install the dedicated Rust path into ExecuTorch Arm lowering.
 
     Stock ExecuTorch has no preprocess override hook, so this replaces
-    TOSABackend._preprocess in place. `fast_paths` also replaces parts of
-    ExecuTorch's edge-manager and run_decompositions flow; those paths have no
-    test coverage on rc4, so they are opt-in.
+    TOSABackend._preprocess in place. `fast_paths=True` raises
+    NotImplementedError: RETAB's edge-manager and run_decompositions fast paths
+    stay off until they are re-derived on rc4 (Linear APU-117).
     """
+    _refuse_fast_paths(fast_paths)
     from executorch.backends.arm.tosa.backend import TOSABackend
 
     _capture_stock_tosa_backend()
     _install_ethos_u_unused_input_guard()
-    if fast_paths:
-        _install_edge_decomp_fast_path()
-        _install_run_decomp_fast_path()
 
     # Stock TOSABackend.preprocess and EthosUBackend both call TOSABackend._preprocess,
     # so swapping that one attribute (keeping its name) routes every TOSA lowering here.
@@ -642,6 +652,7 @@ def patch_tosa_backend(*, fast_paths: bool = False):
 def unpatch_tosa_backend():
     """Restore the original ExecuTorch Arm lowering path."""
 
+    # No-ops unless a caller installed the private fast-path helpers itself.
     _uninstall_run_decomp_fast_path()
     _uninstall_edge_decomp_fast_path()
     _restore_parallel_backend_preprocess_multimethods()

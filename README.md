@@ -39,9 +39,9 @@ torch.export -> quantize -> Arm partitioner -> TOSABackend._preprocess
 
 [python/retab/preprocess.py](python/retab/preprocess.py) replaces
 `TOSABackend._preprocess` at runtime and preserves the stock implementation
-for fallback and restoration. Activation also installs guarded decomposition
-fast paths from `_decomp_hooks.py` against available ExecuTorch and torch
-helpers.
+for fallback and restoration. The rest of `to_edge_transform_and_lower` stays
+stock: RETAB's decomposition fast paths are disabled on rc4 (see the
+[Python API](#python-api)).
 
 RETAB handles TOSA 1.0 INT graphs with the target's default pass pipeline.
 It hands these cases to stock preprocessing:
@@ -144,10 +144,13 @@ print(preprocess_stats())
 manager. Nested activation restores the stock backend when the outermost
 activation exits.
 
-By default only `TOSABackend._preprocess` is replaced. `activated(fast_paths=True)`
-also installs RETAB's edge-manager and `run_decompositions` fast paths, which
-speed up the rest of `to_edge_transform_and_lower` but have no test coverage on
-rc4 yet.
+By default, activation replaces only `TOSABackend._preprocess` and marks
+Ethos-U compiles for RETAB's unused-input check. RETAB's edge-manager and
+`run_decompositions` fast paths, which sped up the rest of
+`to_edge_transform_and_lower` on earlier ExecuTorch versions, are disabled
+until they are re-derived on v1.6.0-rc4: the edge-manager fast path skips
+rc4's pre-decomposition transforms. Until then `activated(fast_paths=True)`
+and `install(fast_paths=True)` raise `NotImplementedError`.
 
 For fragmented graphs, an experimental multi-process backend preprocessing
 mode is available through `activated(parallel_backend_preprocess_workers=8)`
@@ -180,7 +183,7 @@ retab/
 ├── python/retab/
 │   ├── integration/             # Stable ExecuTorch install/activation API
 │   ├── preprocess.py            # Backend scope, orchestration, and counters
-│   └── _decomp_hooks.py         # Guarded decomposition fast paths
+│   └── _decomp_hooks.py         # Decomposition fast paths (disabled on rc4)
 ├── compat/executorch.toml       # Tested stock stack and the seams RETAB uses
 └── tests/                       # Python integration tests and rc4 inventories
 ```

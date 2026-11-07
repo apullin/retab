@@ -45,9 +45,11 @@ restores the captured originals.
 `TOSABackend` attributes before replacing `_preprocess`. Both stock TOSA and
 Ethos-U backends call that entry point, and no ExecuTorch fork or override
 hook is involved (`compat/executorch.toml` records `mode = "stock"`).
-Activation also installs guarded decomposition fast paths from
-[../python/retab/_decomp_hooks.py](../python/retab/_decomp_hooks.py) against
-available upstream helpers.
+The decomposition fast paths in
+[../python/retab/_decomp_hooks.py](../python/retab/_decomp_hooks.py) stay off:
+`install(fast_paths=True)` raises until they are re-derived on rc4, since the
+edge-manager fast path skips rc4's pre-decomposition transforms (Linear
+APU-117).
 
 `stock_fallback_reason()` sends float profiles, TOSA major/minor versions
 other than 1.0, development mode, custom pass pipelines, registered pass

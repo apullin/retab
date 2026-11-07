@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from retab.preprocess import (
     FastTOSABackend,
     _all_rust_preprocess,
+    _refuse_fast_paths,
     fast_preprocess,
     patch_tosa_backend as _patch_tosa_backend,
     unpatch_tosa_backend as _unpatch_tosa_backend,
@@ -56,14 +57,17 @@ def install(
 ) -> None:
     """Install RETAB's preprocess into ExecuTorch Arm lowering.
 
-    `fast_paths` also installs RETAB's edge-manager and run_decompositions fast
-    paths (off by default). `parallel_backend_preprocess_workers` is an opt-in
-    escape hatch for highly fragmented lowers that fan out into many delegates.
-    Leave it unset for the default serial behavior. Nested installs keep the
-    options of the outermost one.
+    `fast_paths=True` raises NotImplementedError, at any nesting depth and before
+    anything is installed: RETAB's edge-manager and run_decompositions fast paths
+    are disabled until they are re-derived on ExecuTorch v1.6.0-rc4 (Linear
+    APU-117). `parallel_backend_preprocess_workers` is an opt-in escape hatch for
+    highly fragmented lowers that fan out into many delegates. Leave it unset for
+    the default serial behavior. Nested installs keep the options of the
+    outermost one.
     """
     global _install_depth
 
+    _refuse_fast_paths(fast_paths)
     previous = _push_parallel_backend_preprocess_workers_override(
         parallel_backend_preprocess_workers
     )

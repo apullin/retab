@@ -1,7 +1,10 @@
-"""RETAB's opt-in edge-manager and torch run_decompositions fast paths.
+"""RETAB's edge-manager and torch run_decompositions fast paths.
 
 Each fast path monkeypatches a private ExecuTorch or torch function and restores it
-on uninstall.
+on uninstall. None is re-derived on ExecuTorch v1.6.0-rc4 yet: the edge-manager copy
+predates rc4 and skips its _apply_pre_decomposition_transforms. So RETAB's public
+install refuses fast_paths=True (Linear APU-117); these helpers stay for that
+re-derivation and for measurements that install them deliberately.
 """
 
 import logging

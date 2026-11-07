@@ -28,8 +28,9 @@ without changing the downstream Vela compilation step. RETAB keeps stock
 preprocessing available for unsupported profiles and graph contracts; see
 [the README scope list](../README.md#integration-and-scope).
 
-`_decomp_hooks.py` also installs guarded performance patches against available
-ExecuTorch and torch helpers.
+The performance patches in `_decomp_hooks.py`, which replace private
+ExecuTorch and torch functions, are disabled until they are re-derived on
+v1.6.0-rc4, so the rest of the lowering pipeline is stock.
 
 ## Rust TOSA dependency
 
