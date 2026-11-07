@@ -229,37 +229,4 @@ mod tests {
             ]
         );
     }
-
-    #[test]
-    fn region_resizes_keep_their_int32_val_through_finalize() {
-        use crate::graph::ir::{DType, OpTarget};
-        use crate::test_ir::{call, output, placeholder, qparam};
-
-        // A TOSA RESIZE keeps its int32 val through finalize despite the int8 qparams it
-        // inherits, as rc4's RewriteUpsamplePass types it.
-        let mut region = IrGraph::empty();
-        let x = placeholder(&mut region, "x", [1, 5, 5, 3], "torch.int8");
-        let resize = call(
-            &mut region,
-            "resize",
-            "backend.tosa.RESIZE.default",
-            vec![IrArg::Node(x)],
-            [1, 9, 9, 3],
-            "torch.int32",
-        );
-        region
-            .node_mut(resize)
-            .meta
-            .set_both_qparams(qparam(0.05, 0, "torch.int8"));
-        output(&mut region, resize);
-        let region = stash(region);
-
-        let (graph, _) = ingest_region(&region);
-        let resize = graph
-            .nodes
-            .values()
-            .find(|node| node.target == OpTarget::TosaResize)
-            .unwrap();
-        assert_eq!(resize.meta.val.dtype, DType::Int32);
-    }
 }

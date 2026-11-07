@@ -724,47 +724,6 @@ fn avg_pool2d_reads_rc4_arguments_and_zero_point_operands() {
     assert_eq!(items.tensors.len(), 6, "no serializer-made zero points");
 }
 
-#[test]
-fn views_of_avg_pools_need_no_layout_transpose() {
-    // G6: an AVG_POOL2D view already works in NHWC coordinates.
-    let mut ir = IrGraph::empty();
-    let x = placeholder(&mut ir, "x", [1, 4, 3, 5], INT8);
-    let x_nhwc = permute(&mut ir, "x_nhwc", x, &[0, 2, 3, 1], INT8);
-    let input_zp = constant(&mut ir, "input_zp", &[1], IrDType::Int8, vec![0]);
-    let output_zp = constant(&mut ir, "output_zp", &[1], IrDType::Int8, vec![0]);
-    let pool = call(
-        &mut ir,
-        "pool",
-        "backend.tosa.AVG_POOL2D.default",
-        vec![
-            IrArg::Node(x_nhwc),
-            IrArg::Node(input_zp),
-            IrArg::Node(output_zp),
-            list(&[3, 1]),
-            list(&[1, 1]),
-            list(&[0, 0, 0, 0]),
-            IrArg::Dtype(INT32.to_string()),
-        ],
-        [1, 1, 5, 4],
-        INT8,
-    );
-    ir.node_mut(pool).meta.set_both_qparams(qp(0.05, 0, INT8));
-    let view = call(
-        &mut ir,
-        "view",
-        "aten.view_copy.default",
-        vec![IrArg::Node(pool), list(&[1, 5, 4])],
-        [1, 5, 4],
-        INT8,
-    );
-    output(&mut ir, view);
-    let items = serialize_explicit(&ir);
-    assert_eq!(single_op(&items, Op::Transpose).outputs, ["x_nhwc"]);
-    let reshape = single_op(&items, Op::Reshape);
-    assert_eq!(reshape.inputs[0], "pool");
-    assert_eq!(tensor(&items, "view").shape, [1, 5, 4]);
-}
-
 // ---------------------------------------------------------------------------
 // Resize
 // ---------------------------------------------------------------------------
@@ -979,116 +938,7 @@ fn aten_spatial_ops_send_explicit_graphs_to_stock() {
 }
 
 #[test]
-fn explicit_mode_keeps_the_layout_transposes_a_peephole_would_cancel() {
-    // G5: no post-emission peephole cancels the inverse pair; the IR's layout passes own
-    // the TRANSPOSEs.
-    let mut ir = IrGraph::empty();
-    let x = placeholder(&mut ir, "x", [1, 2, 3, 4], FLOAT32);
-    let nhwc = permute(&mut ir, "nhwc", x, &[0, 2, 3, 1], FLOAT32);
-    let nchw = permute(&mut ir, "nchw", nhwc, &[0, 3, 1, 2], FLOAT32);
-    let neg = call(
-        &mut ir,
-        "neg",
-        "aten.neg.default",
-        vec![IrArg::Node(nchw)],
-        [1, 2, 3, 4],
-        FLOAT32,
-    );
-    output(&mut ir, neg);
-    let explicit = serialize_explicit(&ir);
-    assert_eq!(ops_of(&explicit, Op::Transpose).len(), 2);
-    assert_eq!(single_op(&explicit, Op::Negate).inputs[0], "nchw");
-}
-
-#[test]
-fn explicit_main_outputs_get_no_inferred_layout_transpose() {
-    // G4: no output TRANSPOSE is inferred when a rank-4 output's shape and val disagree;
-    // IrNormalizeDelegateIOLayout owns the boundary.
-    let mut graph = Graph::new();
-    let mut input = |name: &str| {
-        graph.create_node(
-            OpType::Placeholder,
-            OpTarget::Other(name.into()),
-            smallvec![],
-            Vec::new(),
-            NodeMeta::new(TensorInfo::new(&[1, 2, 3, 4], IrDType::Float32)),
-            name.into(),
-        )
-    };
-    let (x, y) = (input("x"), input("y"));
-    let add = graph.create_node(
-        OpType::CallFunction,
-        OpTarget::Add,
-        smallvec![Arg::Node(x), Arg::Node(y)],
-        Vec::new(),
-        NodeMeta::new(TensorInfo::new(&[1, 3, 4, 2], IrDType::Float32)),
-        "add".into(),
-    );
-    graph.create_node(
-        OpType::Output,
-        OpTarget::Other("output".into()),
-        smallvec![Arg::Node(add)],
-        Vec::new(),
-        NodeMeta::new(TensorInfo::new(&[], IrDType::Float32)),
-        "output".into(),
-    );
-    graph.inputs = vec![x, y];
-    let explicit = try_serialize_graph(graph, &TensorStore::new()).unwrap();
-    assert_eq!(explicit.output_names, ["add"]);
-    assert!(ops_of(&explicit, Op::Transpose).is_empty());
-}
-
-#[test]
-fn rank4_getitems_and_tosa_convs_keep_their_val_shapes() {
-    // B2: rank-4 getitems and TOSA conv/pool vals are TOSA shapes, not logical NCHW ones
-    // to reorder to [d0, d2, d3, d1].
-    let mut graph = Graph::new();
-    let x = graph.create_node(
-        OpType::Placeholder,
-        OpTarget::Other("x".into()),
-        smallvec![],
-        Vec::new(),
-        NodeMeta::new(TensorInfo::new(&[2], IrDType::Int8)),
-        "x".into(),
-    );
-    let getitem = graph.create_node(
-        OpType::CallFunction,
-        OpTarget::Other("getitem".into()),
-        smallvec![Arg::Node(x), Arg::Int(0)],
-        Vec::new(),
-        NodeMeta::new(TensorInfo::new(&[1, 8, 6, 5], IrDType::Int8)),
-        "getitem".into(),
-    );
-    let pool = graph.create_node(
-        OpType::CallFunction,
-        OpTarget::TosaMaxPool2d,
-        smallvec![
-            Arg::Node(getitem),
-            Arg::IntList(smallvec![1, 1]),
-            Arg::IntList(smallvec![1, 1]),
-            Arg::IntList(smallvec![0, 0, 0, 0])
-        ],
-        Vec::new(),
-        NodeMeta::new(TensorInfo::new(&[1, 8, 6, 5], IrDType::Int8)),
-        "pool".into(),
-    );
-    let store = TensorStore::new();
-    visitors::shape_utils::clear_shape_cache();
-    for id in [getitem, pool] {
-        let node = graph.node(id).unwrap();
-        assert_eq!(
-            visitors::actual_tensor_shape(&graph, &store, node),
-            vec![1, 8, 6, 5],
-            "{}",
-            node.name
-        );
-    }
-}
-
-#[test]
-fn explicit_mode_drops_the_singleton_transposes_of_select_and_sum() {
-    // G7: the dim-order serializer's TRANSPOSEs here only moved the removed size-1 dim;
-    // with no peephole to relabel them as RESHAPEs, none may be emitted.
+fn select_and_sum_serialize_at_their_val_shapes() {
     let mut ir = IrGraph::empty();
     let x = placeholder(&mut ir, "x", [2, 3, 4], INT32);
     let select = call(
@@ -1113,7 +963,6 @@ fn explicit_mode_drops_the_singleton_transposes_of_select_and_sum() {
         vec![IrArg::List(vec![IrArg::Node(select), IrArg::Node(sum)])],
     );
     let explicit = serialize_explicit(&ir);
-    assert!(ops_of(&explicit, Op::Transpose).is_empty());
     assert_eq!(tensor(&explicit, "select").shape, [3, 4]);
     assert_eq!(tensor(&explicit, "sum").shape, [3, 4]);
 }

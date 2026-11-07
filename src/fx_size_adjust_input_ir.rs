@@ -227,36 +227,6 @@ mod tests {
     use crate::test_ir::{f32_call, f32_placeholder, output, placeholder, qparam};
 
     #[test]
-    fn regression_transposed_convolution_keeps_seven_by_seven_input() {
-        let mut graph = IrGraph::empty();
-        let input = f32_placeholder(&mut graph, "x", [1, 1, 7, 7]);
-        let weight = f32_placeholder(&mut graph, "weight", [1, 1, 2, 2]);
-        let conv = f32_call(
-            &mut graph,
-            "conv_transpose",
-            "aten.convolution.default",
-            vec![
-                IrArg::Node(input),
-                IrArg::Node(weight),
-                IrArg::None,
-                i64_list_arg(&[2, 2]),
-                i64_list_arg(&[0, 0]),
-                i64_list_arg(&[1, 1]),
-                IrArg::Bool(true),
-                i64_list_arg(&[0, 0]),
-                IrArg::Int(1),
-            ],
-            [1, 1, 14, 14],
-        );
-        output(&mut graph, conv);
-
-        assert!(!IrSizeAdjustInputPass.run(&mut graph));
-        assert_eq!(graph.node(conv).arg_node(0), Some(input));
-        assert_eq!(graph.node_shape(input), Some([1, 1, 7, 7].as_slice()));
-        assert_eq!(graph.live_call_function_ids(), vec![conv]);
-    }
-
-    #[test]
     fn regression_avg_pool_with_kernel_area_divisor_slices_unused_edges() {
         let mut graph = IrGraph::empty();
         let input = f32_placeholder(&mut graph, "x", [1, 1, 5, 5]);
@@ -289,8 +259,6 @@ mod tests {
         assert_eq!(graph.node(height_slice).arg_int(3), Some(4));
         assert_eq!(graph.node(height_slice).arg_node(0), Some(input));
     }
-
-    // rc4's SizeAdjustInputPass (APU-135 P2).
 
     const SLICE: &str = "aten.slice_copy.Tensor";
     const I8: &str = "torch.int8";

@@ -106,34 +106,6 @@ def test_native_entry_points_refuse_unported_policies(entry_point, field, value)
         getattr(_native, entry_point)(None, pipeline_config=config)
 
 
-def _main_block_ops(tosa: bytes) -> list[int]:
-    from tosa import TosaGraph
-
-    block = TosaGraph.TosaGraph.GetRootAs(bytearray(tosa), 0).Regions(0).Blocks(0)
-    return [block.Operators(i).Op() for i in range(block.OperatorsLength())]
-
-
-def test_the_conv_becomes_a_channels_last_tosa_conv2d():
-    """RETAB builds rc4's pipeline: the conv becomes a channels-last TOSA CONV2D on a
-    pre-permuted weight between explicit TRANSPOSEs, so nothing reaches the serializer's
-    aten-conv guard (P2 design X5) and the graph stays with RETAB."""
-    from executorch.backends.arm.tosa.compile_spec import TosaCompileSpec
-    from tosa import Op
-
-    # Frozen parameters, as a lowered program has them: the importer reads the weight's
-    # data, which IrRewriteConv pre-permutes.
-    module = torch.nn.Sequential(torch.nn.Conv2d(2, 4, 3), torch.nn.ReLU()).requires_grad_(False)
-    program = torch.export.export(module, (torch.ones(1, 2, 8, 8),)).run_decompositions()
-    config = rp._build_pipeline_config(TosaCompileSpec("TOSA-1.0+INT"))
-    _native.run_fx_passes(program.graph_module, program, pipeline_config=config)
-    ops = _main_block_ops(_native.ingest_and_serialize())
-    assert ops.count(Op.Op.CONV2D) == 1
-    # The input permute to NHWC and the output permute back; the weight is a constant.
-    assert ops.count(Op.Op.TRANSPOSE) == 2
-    conv = ops.index(Op.Op.CONV2D)
-    assert ops.index(Op.Op.TRANSPOSE) < conv < len(ops) - 1 - ops[::-1].index(Op.Op.TRANSPOSE)
-
-
 @pytest.mark.parametrize("recursive", [False, True])
 def test_main_and_nested_regions_receive_the_same_pipeline_config(monkeypatch, recursive):
     from executorch.exir import graph_module

@@ -26,7 +26,6 @@ _collect_delegate_info_meta = _load_cf_ctx()._collect_delegate_info_meta
 class _DummyNode:
     name: str
     op: str = "call_function"
-    target: object = "dummy.target"
     args: tuple = ()
     meta: dict = field(default_factory=dict)
 

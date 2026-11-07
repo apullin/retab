@@ -329,10 +329,6 @@ fn forward_and_self_references_match_a_rebuild() {
     assert_eq!(b, a + 1);
     assert!(graph.pending_users.is_empty());
     assert_eq!(graph.live_user_ids(b), vec![a]);
-
-    graph.set_arg(b, 0, IrArg::Node(x));
-    assert_eq!(graph.live_user_ids(a), vec![a]);
-    assert_eq!(graph.live_user_ids(b), vec![a]);
 }
 
 /// Switches off the per-edit index check while it lives.

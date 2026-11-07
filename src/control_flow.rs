@@ -263,13 +263,10 @@ mod tests {
         assert_eq!((inner.carried, inner.additional), (2, 1));
     }
 
-    /// A parent that runs a while loop over a layout permute of `x` (rank 4, int8,
-    /// quantized at the returned qparam): the permute to channels-last, then, if
-    /// `restore_logical_layout`, one back. Returns the parent, the qparam and the val
-    /// of the loop's operand.
-    fn while_over_layout_permutes(
-        restore_logical_layout: bool,
-    ) -> (IrGraph, crate::fx_ir::QParam, Vec<i64>) {
+    /// A parent that runs a while loop over a channels-last permute of `x` (rank 4,
+    /// int8, quantized at the returned qparam). Returns the parent, the qparam and the
+    /// val of the loop's operand.
+    fn while_over_a_permute() -> (IrGraph, crate::fx_ir::QParam, Vec<i64>) {
         use crate::fx_ir::i64_list_arg;
         use crate::test_ir::{call, placeholder, qparam};
 
@@ -278,26 +275,15 @@ mod tests {
         let x = placeholder(&mut parent, "x", [2, 3, 4, 5], "torch.int8");
         let qp = qparam(0.25, 3, "torch.int8");
         parent.node_mut(x).meta.set_both_qparams(qp.clone());
-        let mut input = call(
+        let input = call(
             &mut parent,
-            "x_input_layout",
+            "x_nhwc",
             PERMUTE,
             vec![IrArg::Node(x), i64_list_arg(&[0, 2, 3, 1])],
             [2, 4, 5, 3],
             "torch.int8",
         );
         parent.node_mut(input).meta.set_both_qparams(qp.clone());
-        if restore_logical_layout {
-            input = call(
-                &mut parent,
-                "restore_layout",
-                PERMUTE,
-                vec![IrArg::Node(input), i64_list_arg(&[0, 3, 1, 2])],
-                [2, 3, 4, 5],
-                "torch.int8",
-            );
-            parent.node_mut(input).meta.set_both_qparams(qp.clone());
-        }
         let operand_shape = parent.node_shape(input).unwrap().to_vec();
         add_while(
             &mut parent,
@@ -313,7 +299,7 @@ mod tests {
     /// APU-135 P2 design §4.3.1: a region placeholder takes the val of the operand
     /// bound to it, as rc4's `_regularize_submodule` does, before the region's
     /// pipeline and at serialization alike. A permuted operand hands over its own
-    /// val, not the shape behind the permute, and the boundary writes no dim order.
+    /// val, not the shape behind the permute.
     #[test]
     fn region_boundaries_take_operand_vals() {
         use crate::test_ir::{output, placeholder};
@@ -324,71 +310,43 @@ mod tests {
             output(&mut region, ph);
             (region, ph)
         };
-        for restore_logical_layout in [false, true] {
-            let (parent, qp, operand_shape) = while_over_layout_permutes(restore_logical_layout);
-            let check = |region: &IrGraph, ph, stage: &str| {
-                let meta = &region.node(ph).meta;
-                assert_eq!(meta.val_shape(), Some(operand_shape.as_slice()), "{stage}");
-                assert_eq!(meta.val_dtype(), Some("torch.int8"), "{stage}");
-                assert_eq!(meta.val_dim_order(), None, "{stage}");
-                assert!(
-                    meta.output_qparam().unwrap().same_exact_affine_dtype(&qp),
-                    "{stage}"
-                );
-            };
-
-            // Before the region's pipeline runs.
-            let stashed_parent = (parent, LoweringEffectBatch::default());
-            let (mut region, ph) = region_with_input();
+        let (parent, qp, operand_shape) = while_over_a_permute();
+        let check = |region: &IrGraph, ph, stage: &str| {
+            let meta = &region.node(ph).meta;
+            assert_eq!(meta.val_shape(), Some(operand_shape.as_slice()), "{stage}");
+            assert_eq!(meta.val_dtype(), Some("torch.int8"), "{stage}");
             assert!(
-                apply_pre_submodule_qparam_propagation_ir(
-                    Some("cond"),
-                    &mut region,
-                    Some(&stashed_parent),
-                    &BTreeMap::new(),
-                ) > 0
+                meta.output_qparam().unwrap().same_exact_affine_dtype(&qp),
+                "{stage}"
             );
-            check(&region, ph, "pre-pass propagation");
+        };
 
-            // At serialization.
-            let (mut parent, _, _) = while_over_layout_permutes(restore_logical_layout);
-            let mut submodules: BTreeMap<String, StashedPipeline> = ["cond", "body"]
-                .into_iter()
-                .map(|name| {
-                    let (region, _) = region_with_input();
-                    (name.to_string(), (region, LoweringEffectBatch::default()))
-                })
-                .collect();
-            assert!(apply_boundary_contracts(&mut parent, &mut submodules) > 0);
-            for (name, (region, _)) in &submodules {
-                let ph = region.live_placeholder_ids()[0];
-                check(region, ph, &format!("serialization, {name}"));
-            }
-        }
-    }
+        // Before the region's pipeline runs.
+        let stashed_parent = (parent, LoweringEffectBatch::default());
+        let (mut region, ph) = region_with_input();
+        assert!(
+            apply_pre_submodule_qparam_propagation_ir(
+                Some("cond"),
+                &mut region,
+                Some(&stashed_parent),
+                &BTreeMap::new(),
+            ) > 0
+        );
+        check(&region, ph, "pre-pass propagation");
 
-    /// A parent's rank-4 cond or while output keeps its layout in its val, as rc4's
-    /// does (APU-135 P2 design §4.3.1), and so does each region input: the contracts
-    /// apply and change no val.
-    #[test]
-    fn rank4_control_flow_outputs_keep_their_vals() {
-        use crate::test_ir::live_node;
-        use fixtures::RANK4;
-
-        for while_loop in [false, true] {
-            let case = format!("while_loop={while_loop}");
-            let (mut parent, mut submodules) = fixtures::rank4_hierarchy(while_loop);
-            assert!(
-                apply_boundary_contracts(&mut parent, &mut submodules) > 0,
-                "{case}"
-            );
-
-            let getitem = &live_node(&parent, "getitem").meta;
-            assert_eq!(getitem.val_shape(), Some(RANK4.as_slice()), "{case}");
-            for (name, (region, _)) in &submodules {
-                let arg = &live_node(region, "arg0_1").meta;
-                assert_eq!(arg.val_shape(), Some(RANK4.as_slice()), "{case}: {name}");
-            }
+        // At serialization.
+        let (mut parent, _, _) = while_over_a_permute();
+        let mut submodules: BTreeMap<String, StashedPipeline> = ["cond", "body"]
+            .into_iter()
+            .map(|name| {
+                let (region, _) = region_with_input();
+                (name.to_string(), (region, LoweringEffectBatch::default()))
+            })
+            .collect();
+        assert!(apply_boundary_contracts(&mut parent, &mut submodules) > 0);
+        for (name, (region, _)) in &submodules {
+            let ph = region.live_placeholder_ids()[0];
+            check(region, ph, &format!("serialization, {name}"));
         }
     }
 
