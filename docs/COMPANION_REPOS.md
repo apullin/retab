@@ -64,6 +64,9 @@ checkout also works when it is a tested version.
 
 Verify proposed versions and source revisions, rebuild with
 `cargo test --lib --locked` and maturin, and run the repository's Python tests.
+`tests/test_compat_seams.py` checks that every ExecuTorch seam listed in
+`compat/executorch.toml` still exists; review the listed functions' changes
+too, since RETAB copies or depends on their behaviour.
 The crate is a `cdylib`; use maturin for extension linkage rather than
 `cargo build --lib` alone. Maturin reads RETAB's version from `Cargo.toml`.
 
