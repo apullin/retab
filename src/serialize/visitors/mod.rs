@@ -55,9 +55,9 @@ use dtype_quant::{
     compute_multiplier_and_shift_with_width, conv_accumulator_dtype, encode_zp_for_dtype,
     has_only_tosa_rescale_users, input_qparam_zero_point, input_qparam_zero_point_or_kwarg,
     ir_float_dtype_or_float32, is_float_dtype, is_narrow_float_dtype, matmul_input_dtype,
-    node_input_zero_point, node_output_dtype, node_output_zero_point, node_tensor_dtype,
-    normalize_rescale_zp, output_qparam_zero_point, passthrough_input_dtype, single_qparam,
-    tosa_dtype_storage_size, tosa_float_dtype_to_ir_or_float32,
+    node_output_dtype, node_tensor_dtype, normalize_rescale_zp, output_qparam_zero_point,
+    passthrough_input_dtype, single_qparam, tosa_dtype_storage_size,
+    tosa_float_dtype_to_ir_or_float32,
 };
 pub(crate) use emit_result::EmitResult;
 use graph_utils::*;

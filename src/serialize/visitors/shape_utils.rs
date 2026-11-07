@@ -290,108 +290,6 @@ fn table_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option
     first_input_shape(graph, store, node)
 }
 
-pub(super) fn pool_post_pad(
-    input_size: i32,
-    kernel_size: i32,
-    stride: i32,
-    pad: i32,
-    ceil_mode: bool,
-) -> i32 {
-    let numer = input_size - kernel_size + 2 * pad;
-    let mut output_size = if ceil_mode {
-        ((numer + stride - 1) / stride) + 1
-    } else {
-        (numer / stride) + 1
-    };
-    if ceil_mode && (output_size - 1) * stride >= input_size + pad {
-        output_size -= 1;
-    }
-    ((output_size - 1) * stride - input_size + kernel_size - pad).max(0)
-}
-
-pub(super) fn symmetric_pool_pad(padding: &[i32]) -> Vec<i32> {
-    if padding.len() >= 2 {
-        vec![padding[0], padding[0], padding[1], padding[1]]
-    } else if padding.len() == 1 {
-        vec![padding[0], padding[0], padding[0], padding[0]]
-    } else {
-        vec![0, 0, 0, 0]
-    }
-}
-
-pub(super) fn adjusted_max_pool_pad(
-    input_shape: &[i32],
-    kernel: &[i32],
-    stride: &[i32],
-    padding: &[i32],
-    ceil_mode: bool,
-) -> Vec<i32> {
-    if padding.len() == 4 {
-        return padding.to_vec();
-    }
-
-    let symmetric = symmetric_pool_pad(padding);
-    if input_shape.len() != 4 {
-        return symmetric;
-    }
-
-    let (kernel_h, kernel_w) = i32_pair_or_default(kernel, 2);
-    let (stride_h, stride_w) = i32_pair_or_default(stride, 2);
-    vec![
-        symmetric[0],
-        pool_post_pad(input_shape[1], kernel_h, stride_h, symmetric[0], ceil_mode),
-        symmetric[2],
-        pool_post_pad(input_shape[2], kernel_w, stride_w, symmetric[2], ceil_mode),
-    ]
-}
-
-pub(super) fn pool_nhwc_shape(
-    input_shape: &[i32],
-    kernel: &[i32],
-    stride: &[i32],
-    pad: &[i32],
-) -> Option<Vec<i32>> {
-    if input_shape.len() != 4 {
-        return None;
-    }
-
-    let (kh, kw) = i32_pair_or_default(kernel, 2);
-    let (sh, sw) = i32_pair_or_default(stride, 2);
-    let (pad_top, pad_bottom, pad_left, pad_right) = i32_quad_or_default(pad, 0);
-    let oh = (input_shape[1] + pad_top + pad_bottom - kh) / sh + 1;
-    let ow = (input_shape[2] + pad_left + pad_right - kw) / sw + 1;
-
-    (oh > 0 && ow > 0).then_some(vec![input_shape[0], oh, ow, input_shape[3]])
-}
-
-fn pool_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<Vec<i32>> {
-    let is_max_pool = op_semantics::is_max_pool(&node.target);
-    let is_avg_pool = op_semantics::is_avg_pool(&node.target);
-    if !is_max_pool && !is_avg_pool {
-        return None;
-    }
-
-    let input_shape = first_input_shape(graph, store, node)?;
-    if input_shape.len() != 4 {
-        return None;
-    }
-
-    let kernel = kwarg_or_arg_i32_list_or(node, "kernel", 1, vec![2, 2]);
-    let stride = kwarg_or_arg_i32_list_or(node, "stride", 2, kernel.clone());
-    let raw_padding = kwarg_or_arg_i32_list(node, "pad", 3);
-    let pad = if is_max_pool {
-        let ceil_mode = kwarg_bool(node, "ceil_mode", arg_bool(node, 5, false));
-        adjusted_max_pool_pad(&input_shape, &kernel, &stride, &raw_padding, ceil_mode)
-    } else if raw_padding.len() == 4 {
-        raw_padding
-    } else {
-        let ceil_mode = kwarg_bool(node, "ceil_mode", arg_bool(node, 4, false));
-        adjusted_max_pool_pad(&input_shape, &kernel, &stride, &raw_padding, ceil_mode)
-    };
-
-    pool_nhwc_shape(&input_shape, &kernel, &stride, &pad)
-}
-
 fn strided_slice_shape(node: &Node, input_shape: &[i32]) -> Option<Vec<i32>> {
     if node.args.len() < 4 {
         return None;
@@ -442,10 +340,10 @@ pub(crate) fn actual_tensor_shape(graph: &Graph, store: &TensorStore, node: &Nod
 }
 
 fn actual_tensor_shape_impl(graph: &Graph, store: &TensorStore, node: &Node) -> Vec<i32> {
-    // A TOSA conv/pool/resize val is its TOSA shape. The rules below would misread it:
-    // `pool_tensor_shape` takes AVG_POOL2D's zero-point operands for its kernel and stride
-    // (critique B1), and the broadcast rule was written for logical NCHW vals. A TRANSPOSE
-    // keeps the input-permuting rule below.
+    // A TOSA conv/pool/resize val is its TOSA shape (P2 design G1). The generic rules
+    // below don't know these ops' operands: the broadcast rule would combine a conv's
+    // input, weight and bias, or AVG_POOL2D's input and zero points (critique B1). A
+    // TRANSPOSE keeps the input-permuting rule below.
     if op_semantics::has_explicit_tosa_shape_val(&node.target) {
         return raw_i32_shape(node);
     }
@@ -486,10 +384,6 @@ fn actual_tensor_shape_impl(graph: &Graph, store: &TensorStore, node: &Node) -> 
     }
 
     if let Some(shape) = broadcasted_input_tensor_shape(graph, store, node) {
-        return shape;
-    }
-
-    if let Some(shape) = pool_tensor_shape(graph, store, node) {
         return shape;
     }
 
@@ -615,24 +509,6 @@ mod tests {
         assert!(result.tensors.last().unwrap().shape.is_empty());
         assert_eq!(result.shapes[0].rank, 0);
         assert!(result.shapes[0].data.is_empty());
-    }
-
-    #[test]
-    fn ceil_pool_drops_window_starting_inside_padding() {
-        // k=2 s=2 p=1 on H=5: naive ceil gives 4 windows, but the last
-        // would start at 6 >= 5 + 1, so it is dropped -> 3 rows.
-        assert_eq!(pool_post_pad(5, 2, 2, 1, true), 0);
-        let pad = adjusted_max_pool_pad(&[1, 5, 5, 1], &[2, 2], &[2, 2], &[1, 1], true);
-        assert_eq!(pad, vec![1, 0, 1, 0]);
-        assert_eq!(
-            pool_nhwc_shape(&[1, 5, 5, 1], &[2, 2], &[2, 2], &pad),
-            Some(vec![1, 3, 3, 1])
-        );
-    }
-
-    #[test]
-    fn floor_pool_post_pad_is_zero_when_windows_fit_exactly() {
-        assert_eq!(pool_post_pad(8, 3, 2, 1, false), 0);
     }
 
     #[test]

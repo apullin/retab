@@ -242,43 +242,6 @@ fn actual_tensor_dtype_impl(graph: &Graph, node: &Node) -> DType {
     }
 }
 
-fn producer_output_zero_point(graph: &Graph, node: &Node, pos: usize) -> Option<i32> {
-    let pos = pos as u32;
-    let Arg::Node(input_id) = node.args.get(pos as usize)? else {
-        return None;
-    };
-    let input_node = graph.node(*input_id)?;
-    input_node
-        .meta
-        .output_qparams
-        .iter()
-        .find(|(qp_pos, _)| *qp_pos == 0)
-        .or_else(|| {
-            input_node
-                .meta
-                .input_qparams
-                .iter()
-                .find(|(qp_pos, _)| *qp_pos == 0)
-        })
-        .map(|(_, qp)| qp.zero_point as i32)
-}
-
-pub(super) fn node_input_zero_point(
-    graph: &Graph,
-    node: &Node,
-    pos: usize,
-    kwarg_name: &str,
-    default: i32,
-) -> i32 {
-    producer_output_zero_point(graph, node, pos)
-        .or_else(|| input_qparam_zero_point(node, pos))
-        .unwrap_or_else(|| kwarg_i32(node, kwarg_name, default))
-}
-
-pub(super) fn node_output_zero_point(node: &Node, kwarg_name: &str, default: i32) -> i32 {
-    output_qparam_zero_point(node).unwrap_or_else(|| kwarg_i32(node, kwarg_name, default))
-}
-
 pub(super) fn matmul_input_dtype(graph: &Graph, node: &Node, index: usize) -> DType {
     match node.args.get(index) {
         Some(Arg::Node(id)) => graph

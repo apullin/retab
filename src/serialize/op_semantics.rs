@@ -124,14 +124,6 @@ pub(crate) fn is_aten_sum(target: &OpTarget) -> bool {
     matches!(target, OpTarget::Sum)
 }
 
-pub(crate) fn is_max_pool(target: &OpTarget) -> bool {
-    matches!(target, OpTarget::MaxPool2d | OpTarget::TosaMaxPool2d)
-}
-
-pub(crate) fn is_avg_pool(target: &OpTarget) -> bool {
-    matches!(target, OpTarget::AvgPool2d | OpTarget::TosaAvgPool2d)
-}
-
 /// TOSA-dialect ops whose val is their TOSA shape, so the serializer reads it as is
 /// rather than recomputing it from their arguments (P2 design §4.2 G1, critique B1).
 ///
