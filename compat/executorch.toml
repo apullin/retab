@@ -3,9 +3,10 @@ mode = "stock"
 reason = "RETAB patches TOSABackend._preprocess at runtime and falls back to stock preprocess outside its scope, so released ExecuTorch wheels work without a fork."
 tested = ["executorch 1.6.0 (v1.6.0-rc4, 4776f71b6)"]
 
-# Every ExecuTorch attribute RETAB replaces, wraps, calls or reads beyond the public
-# API, as a dotted path. tests/test_compat_seams.py checks that each one resolves; a
-# changed one needs review when the tested ExecuTorch moves.
+# The ExecuTorch internals RETAB replaces or wraps, or whose behaviour it relies on, as
+# dotted paths (compile-spec accessors it merely calls are not listed).
+# tests/test_compat_seams.py checks that each one resolves; review any that changed
+# when the tested ExecuTorch moves.
 [executorch.required_seams]
 # Replaced while RETAB is installed; stock's is the fallback. TOSABackend.preprocess,
 # EthosUBackend and VgfBackend all call it.

@@ -116,9 +116,9 @@ To produce a wheel:
 Maturin takes the package version from `Cargo.toml`.
 
 `tests/` contains Python integration, seam, placeholder binding,
-control-flow, and CNN lowering smoke tests. Tests requiring the native extension,
-ExecuTorch's Arm backend, or the TOSA reference model skip when those
-components are unavailable.
+control-flow, and CNN lowering smoke tests. Tests requiring the native
+extension, ExecuTorch's Arm backend, or the TOSA reference model skip when
+those components are unavailable.
 
 ### Smoke lower
 
