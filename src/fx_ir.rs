@@ -1015,28 +1015,6 @@ impl IrGraph {
         }
     }
 
-    /// `input`'s shape, derived from the operand of its chain of permutes through their
-    /// perms rather than read from their vals; None when a perm does not fit.
-    pub(crate) fn logical_input_shape(&self, input: NodeId) -> Option<Vec<i64>> {
-        let mut current = input;
-        let mut permutations = Vec::new();
-        while crate::fx_target::is_permute_target(&self.node(current).target) {
-            permutations.push(self.node(current).arg_int_list(1)?);
-            current = self.node(current).arg_node(0)?;
-        }
-        let mut shape = self.node_shape_vec(current)?;
-        for permutation in permutations.into_iter().rev() {
-            if permutation.len() != shape.len() {
-                return None;
-            }
-            shape = permutation
-                .into_iter()
-                .map(|axis| normalize_dim(axis, shape.len()).map(|axis| shape[axis]))
-                .collect::<Option<Vec<_>>>()?;
-        }
-        Some(shape)
-    }
-
     pub(crate) fn eliminate_dead_code(&mut self) -> bool {
         self.eliminate_dead_code_keeping(|_| false)
     }

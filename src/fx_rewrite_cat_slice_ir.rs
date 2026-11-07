@@ -36,7 +36,7 @@ fn overlapping_inputs(
     let mut overlaps = Vec::new();
     let mut offset = 0i64;
     for &input in inputs {
-        let shape = graph.logical_input_shape(input)?;
+        let shape = graph.node_shape_vec(input)?;
         if shape.len() != rank {
             return None;
         }
@@ -122,7 +122,7 @@ impl IrPass for IrRewriteCatSlicePass {
                     {
                         overlap.input
                     } else {
-                        let mut shape = cursor.graph().logical_input_shape(overlap.input).unwrap();
+                        let mut shape = cursor.graph().node_shape_vec(overlap.input).unwrap();
                         shape[dim] = overlap.end - overlap.start;
                         let mut slice_meta = meta.cloned_with_same_dtype_or_float32(shape);
                         if let Some(qparam) = &input_qparam {

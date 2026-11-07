@@ -199,7 +199,7 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     }
     let meta = orig_meta.tensor_stamp_same_dtype_or_float32();
-    let input_shape = match graph.logical_input_shape(input_id) {
+    let input_shape = match graph.node_shape_vec(input_id) {
         Some(s) => s,
         None => return false,
     };

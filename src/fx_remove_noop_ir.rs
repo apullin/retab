@@ -230,7 +230,7 @@ impl IrPass for IrRemoveNoopPass {
                     _ => false,
                 };
                 let full_slice = static_slice(graph, id).is_some_and(|slice| {
-                    graph.logical_input_shape(input).is_some_and(|shape| {
+                    graph.node_shape_vec(input).is_some_and(|shape| {
                         slice.start.len() == shape.len()
                             && slice.start.iter().all(|&start| start == 0)
                             && slice.size == shape

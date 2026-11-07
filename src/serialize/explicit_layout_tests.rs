@@ -988,7 +988,7 @@ fn invariant_check_reports_stale_vals() {
     visitors::shape_utils::clear_shape_cache();
     assert_eq!(check_layout_invariants("main", &graph, &store), Ok(()));
 
-    // IrSizeAdjustInput's slices keep the unsliced val (design F5).
+    // A synthetic stale slice: its val keeps the unsliced shape.
     graph.create_node(
         OpType::CallFunction,
         OpTarget::Slice,
