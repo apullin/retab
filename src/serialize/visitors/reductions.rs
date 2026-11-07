@@ -16,10 +16,12 @@ pub fn register(table: &mut EmitterTable) {
     }
 }
 
+/// One reduced axis: `axis` counts from the front of the input, and `raw_dim` is the dim
+/// as the node gives it, which orders the reductions and names the intermediate tensors.
 #[derive(Debug, Clone, Copy)]
 struct ReduceAxis {
     raw_dim: i32,
-    tosa_axis: i32,
+    axis: i32,
 }
 
 #[derive(Debug)]
@@ -55,7 +57,7 @@ impl ParsedReduceSpec {
             .into_iter()
             .map(|raw_dim| ReduceAxis {
                 raw_dim,
-                tosa_axis: input_node
+                axis: input_node
                     .map(|n| normalize_axis(n, raw_dim))
                     .unwrap_or(raw_dim),
             })
@@ -183,7 +185,7 @@ fn emit_quant_to_float_chain(
 /// `keepdim` is false.
 ///
 /// Each iteration collapses one axis of the current tensor via `op` +
-/// `make_attr(tosa_axis)`.  The caller controls naming through:
+/// `make_attr(axis)`.  The caller controls naming through:
 ///
 ///   - `intermediate_prefix` – used to build names for non-final reduce outputs
 ///     (e.g. `"reduce_axis"` → `"{node}_reduce_axis{raw_dim}"`).
@@ -211,9 +213,9 @@ fn emit_multi_axis_reduce_loop(
     let mut current_input = input_name;
     let mut current_shape = input_shape;
 
-    for (idx, axis) in axes.iter().enumerate() {
+    for (idx, reduced) in axes.iter().enumerate() {
         let mut out_shape = current_shape.clone();
-        if let Some(slot) = out_shape.get_mut(axis.tosa_axis as usize) {
+        if let Some(slot) = out_shape.get_mut(reduced.axis as usize) {
             *slot = 1;
         }
 
@@ -226,13 +228,13 @@ fn emit_multi_axis_reduce_loop(
         let out_name = if use_final {
             final_name.clone()
         } else {
-            format!("{}_{}{}", node_name, intermediate_prefix, axis.raw_dim)
+            format!("{}_{}{}", node_name, intermediate_prefix, reduced.raw_dim)
         };
 
         result.push_output_op(
             TosaTensor::new(&out_name, out_shape.clone(), dtype),
             op,
-            make_attr(axis.tosa_axis),
+            make_attr(reduced.axis),
             vec![current_input.clone()],
         );
 

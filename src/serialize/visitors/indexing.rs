@@ -22,7 +22,7 @@ pub fn register(table: &mut EmitterTable) {
 struct ParsedSelectCopySpec {
     input_name: String,
     input_shape: Vec<i32>,
-    mapped_dim: usize,
+    dim: usize,
     index: i32,
     dtype: DType,
 }
@@ -54,13 +54,10 @@ impl ParsedSelectCopySpec {
 
         let raw_dim = arg_i64(node, 1, 0);
         let rank = input_shape.len() as i64;
-        let normalized_dim = if raw_dim < 0 { raw_dim + rank } else { raw_dim };
-        let mapped_dim = input_node
-            .map(|n| normalize_axis(n, normalized_dim as i32) as usize)
-            .unwrap_or(normalized_dim as usize);
+        let dim = (if raw_dim < 0 { raw_dim + rank } else { raw_dim }) as usize;
 
         let raw_index = arg_i64(node, 2, 0);
-        let dim_size = input_shape.get(mapped_dim).copied().unwrap_or(1) as i64;
+        let dim_size = input_shape.get(dim).copied().unwrap_or(1) as i64;
         let index = if raw_index < 0 {
             (dim_size + raw_index).max(0) as i32
         } else {
@@ -70,7 +67,7 @@ impl ParsedSelectCopySpec {
         Self {
             input_name,
             input_shape,
-            mapped_dim,
+            dim,
             index,
             dtype: node_output_dtype(node),
         }
@@ -289,9 +286,9 @@ pub(super) fn emit_select_copy(ctx: &EmitContext) -> EmitResult {
 
     let slice_name = format!("{}_slice", node.name);
     let mut start_vec = vec![0i32; spec.input_shape.len()];
-    start_vec[spec.mapped_dim] = spec.index;
+    start_vec[spec.dim] = spec.index;
     let mut size_vec = spec.input_shape.clone();
-    size_vec[spec.mapped_dim] = 1;
+    size_vec[spec.dim] = 1;
 
     push_const_shape(&mut result, format!("{}_start", slice_name), start_vec);
     push_const_shape(

@@ -35,7 +35,7 @@ pub(in crate::serialize::visitors) fn emit_aten_sum(ctx: &EmitContext) -> EmitRe
             spec.input_shape,
             spec.axes
                 .iter()
-                .map(|axis| (axis.raw_dim, axis.tosa_axis))
+                .map(|reduced| (reduced.raw_dim, reduced.axis))
                 .collect::<Vec<_>>(),
             spec.keepdim,
             ctx.shape(),
@@ -82,7 +82,7 @@ pub(in crate::serialize::visitors) fn emit_aten_sum(ctx: &EmitContext) -> EmitRe
         current_shape,
         base_dtype,
         Op::ReduceSum,
-        |tosa_axis| Attribute::ReduceSum(ReduceSumAttribute { axis: tosa_axis }),
+        |axis| Attribute::ReduceSum(ReduceSumAttribute { axis }),
         "reduce_axis",
         node.name.clone(),
         false, // final_on_last: only use node.name when keepdim

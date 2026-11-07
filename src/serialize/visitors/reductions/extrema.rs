@@ -32,7 +32,6 @@ fn emit_argmax(ctx: &EmitContext) -> EmitResult {
         })
         .expect("argmax requires an explicit dim") as i32;
     let dim = if raw_dim < 0 { raw_dim + rank } else { raw_dim };
-    let axis = normalize_axis(input, dim);
     let output_shape: Vec<i32> = node.meta.val.shape[..node.meta.val.shape_len as usize]
         .iter()
         .map(|&d| d as i32)
@@ -50,7 +49,7 @@ fn emit_argmax(ctx: &EmitContext) -> EmitResult {
     };
 
     let attr = Attribute::ArgMax(ArgMaxAttribute {
-        axis,
+        axis: dim,
         nan_mode: NanPropagationMode::Propagate,
     });
     let mut result = EmitResult::default();
@@ -97,17 +96,17 @@ fn emit_reduce_extrema(
 
     let make_attr: Box<dyn Fn(i32) -> Attribute> = match kind {
         ReduceExtremaKind::Any => {
-            Box::new(|tosa_axis| Attribute::ReduceAny(ReduceAnyAttribute { axis: tosa_axis }))
+            Box::new(|axis| Attribute::ReduceAny(ReduceAnyAttribute { axis }))
         }
-        ReduceExtremaKind::Min => Box::new(|tosa_axis| {
+        ReduceExtremaKind::Min => Box::new(|axis| {
             Attribute::ReduceMin(ReduceMinAttribute {
-                axis: tosa_axis,
+                axis,
                 nan_mode: NanPropagationMode::Propagate,
             })
         }),
-        ReduceExtremaKind::Max => Box::new(|tosa_axis| {
+        ReduceExtremaKind::Max => Box::new(|axis| {
             Attribute::ReduceMax(ReduceMaxAttribute {
-                axis: tosa_axis,
+                axis,
                 nan_mode: NanPropagationMode::Propagate,
             })
         }),
