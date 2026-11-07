@@ -564,15 +564,15 @@ def _preprocess(
 ) -> PreprocessResult:
     """TOSABackend._preprocess while RETAB is installed: RETAB's lowering.
 
-    It carries stock's name, the way the Ethos-U guard keeps
-    EthosUBackend.preprocess's, because callers find the attribute through the
+    It carries stock's __name__ because callers find the attribute through the
     installed function's name: rc4's misc/test_external_vela_blocks.py patches
-    `patch.object(TOSABackend, TOSABackend._preprocess.__name__, ...)`.
+    `patch.object(TOSABackend, TOSABackend._preprocess.__name__, ...)`. Its
+    __qualname__ stays its own, so pickle still finds it at
+    retab.preprocess._preprocess.
     """
     return _all_rust_preprocess(edge_program, compile_spec)
 
 
-_preprocess.__qualname__ = "TOSABackend._preprocess"
 _preprocess._retab_override = True
 
 

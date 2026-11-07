@@ -34,7 +34,9 @@ def test_patch_then_unpatch_restores_stock_attributes():
 
 def test_patching_preprocess_by_name_works_while_retab_is_installed():
     """rc4's misc/test_external_vela_blocks.py patches TOSABackend._preprocess by the
-    installed function's __name__, so RETAB's replacement keeps stock's name."""
+    installed function's __name__, so RETAB's replacement keeps stock's name. It stays
+    picklable by reference, as stock's and the earlier _all_rust_preprocess were."""
+    import pickle
     from unittest.mock import patch
 
     from retab.integration.executorch_arm import activated
@@ -43,6 +45,7 @@ def test_patching_preprocess_by_name_works_while_retab_is_installed():
     with activated():
         installed = TOSABackend.__dict__["_preprocess"]
         assert TOSABackend._preprocess.__name__ == "_preprocess"
+        assert pickle.loads(pickle.dumps(TOSABackend._preprocess)) is rp._preprocess
         with patch.object(TOSABackend, TOSABackend._preprocess.__name__, return_value="mocked"):
             assert TOSABackend._preprocess(None, None) == "mocked"
         assert TOSABackend.__dict__["_preprocess"] is installed
