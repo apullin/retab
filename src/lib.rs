@@ -136,7 +136,7 @@ fn ir_has_control_flow(ir: &fx_ir::IrGraph) -> bool {
 }
 
 /// Append a diagnostic constant-fold fallback record to the file named by
-/// `ARM_FOLD_FALLBACK_FILE` (no-op when unset). Used to sweep the battery for
+/// `RETAB_FOLD_FALLBACK_FILE` (no-op when unset). Used to sweep the battery for
 /// unsupported Rust constant materialization.
 pub(crate) fn fold_fallback_log(msg: &str) {
     use std::io::Write;

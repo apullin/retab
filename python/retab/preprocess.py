@@ -45,14 +45,6 @@ _parallel_backend_multimethod_originals: dict[type, tuple[bool, object | None]] 
 _parallel_backend_preprocess_jobs = None
 
 
-def _env_get(name: str, *aliases: str, default: str | None = None) -> str | None:
-    for candidate in (name, *aliases):
-        value = os.environ.get(candidate)
-        if value is not None:
-            return value
-    return default
-
-
 def _run_control_flow_submodule_rust_passes(
     gm, edge_program, retab, pipeline_config, region_prefix: str | None = None
 ) -> None:
@@ -103,7 +95,7 @@ def _maybe_dump_tosa_artifacts(edge_program, compile_spec, tosa_bytes) -> None:
                 )
             )
 
-    dump_path = _env_get("RETAB_DUMP_TOSA", "ARM_TOSA_ENGINE_DUMP_TOSA")
+    dump_path = os.environ.get("RETAB_DUMP_TOSA")
     if dump_path:
         dump_file = Path(dump_path)
         dump_file.parent.mkdir(parents=True, exist_ok=True)
@@ -112,11 +104,7 @@ def _maybe_dump_tosa_artifacts(edge_program, compile_spec, tosa_bytes) -> None:
 
 
 def _parallel_backend_preprocess_workers() -> int:
-    raw = _env_get(
-        "RETAB_PARALLEL_BACKEND_PREPROCESS_WORKERS",
-        "ARM_TOSA_ENGINE_PARALLEL_BACKEND_PREPROCESS_WORKERS",
-        default="0",
-    )
+    raw = os.environ.get("RETAB_PARALLEL_BACKEND_PREPROCESS_WORKERS", "0")
     try:
         workers = int(raw)
     except ValueError:
@@ -154,7 +142,7 @@ def _compile_specs_safe_for_parallel(
     parse_compile_spec: Callable[[list[CompileSpec]], object],
     compile_specs,
 ) -> bool:
-    if _env_get("RETAB_DUMP_TOSA", "ARM_TOSA_ENGINE_DUMP_TOSA"):
+    if os.environ.get("RETAB_DUMP_TOSA"):
         return False
     for method_specs in compile_specs.values():
         for specs_for_program in method_specs:

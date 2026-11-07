@@ -155,8 +155,7 @@ or `RETAB_PARALLEL_BACKEND_PREPROCESS_WORKERS`. It is opt-in and returns to
 serial execution for debug artifact dumps or when fork multiprocessing is
 unavailable. Counters remain process-local.
 
-[docs/ENVIRONMENT.md](docs/ENVIRONMENT.md) documents all environment reads,
-including legacy aliases and settings that are dormant on stock rc4.
+[docs/ENVIRONMENT.md](docs/ENVIRONMENT.md) documents all environment reads.
 
 ## Validation
 

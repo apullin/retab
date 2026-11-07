@@ -592,7 +592,7 @@ fn qualify_region_arg(arg: &mut Arg, region: &str) {
     }
 }
 
-/// Diagnostic (ARM_FOLD_FALLBACK_FILE): report constant placeholder nodes that the
+/// Diagnostic (RETAB_FOLD_FALLBACK_FILE): report constant placeholder nodes that the
 /// serializer will emit as CONST but whose data is absent from the IR-derived
 /// store.
 pub fn report_missing_consts(graph: &Graph, store: &TensorStore) {
@@ -745,7 +745,7 @@ fn collect_ir_refs(a: &IrArg, out: &mut std::collections::HashSet<IrNodeId>) {
 }
 
 /// Env-gated structural dump for inspecting an IR-converted graph
-/// (ARM_FROM_IR_DEBUG=1).
+/// (RETAB_FROM_IR_DEBUG=1).
 pub fn debug_dump(graph: &Graph, label: &str) {
     eprintln!(
         "=== {label}: {} nodes inputs={:?} output={:?} ===",
