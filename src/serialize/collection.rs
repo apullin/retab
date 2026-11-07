@@ -251,7 +251,7 @@ fn collect_graph_items(
 /// X5, critique B11). Their visitors date from the dim-order model, so a survivor (a
 /// rewrite declined it) sends the graph to stock, through the same seam as
 /// `control_flow::assembly`.
-pub(super) fn reject_aten_spatial_ops(region: &str, graph: &Graph) -> Result<(), String> {
+fn reject_aten_spatial_ops(region: &str, graph: &Graph) -> Result<(), String> {
     let Some(node) = graph
         .order
         .iter()

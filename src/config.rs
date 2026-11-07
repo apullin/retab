@@ -64,10 +64,6 @@ pub(crate) fn debug_cat_enabled() -> bool {
     env_any_equals(&["RETAB_DEBUG_CAT", "ARM_TOSA_ENGINE_DEBUG_CAT"], "1")
 }
 
-pub(crate) fn debug_layout_enabled() -> bool {
-    env_any_equals(&["RETAB_DEBUG_LAYOUT", "ARM_TOSA_ENGINE_DEBUG_LAYOUT"], "1")
-}
-
 pub(crate) fn debug_node_probe() -> Option<String> {
     env_any_var(&["RETAB_DEBUG_NODE", "ARM_TOSA_ENGINE_DEBUG_NODE"])
 }

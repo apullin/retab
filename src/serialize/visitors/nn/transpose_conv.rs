@@ -67,7 +67,7 @@ pub(in crate::serialize::visitors) fn emit_transpose_conv2d(ctx: &EmitContext) -
     let stride = transpose_conv_stride(node);
     let local_bound = kwarg_bool(node, "local_bound", false);
 
-    let (input_zp, weight_zp) = input_weight_zero_points(node, true);
+    let (input_zp, weight_zp) = input_weight_zero_points(node);
     let conv_inputs = prepare_conv_inputs(
         &mut result,
         graph,

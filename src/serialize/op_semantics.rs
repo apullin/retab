@@ -40,7 +40,6 @@ pub(crate) fn is_accumulator_output(target: &OpTarget) -> bool {
         target,
         OpTarget::Conv2d
             | OpTarget::ConvTranspose2d
-            | OpTarget::DepthwiseConv2d
             | OpTarget::Linear
             | OpTarget::Addmm
             | OpTarget::Matmul
@@ -160,7 +159,6 @@ pub(crate) fn is_aten_spatial_layout_op(target: &OpTarget) -> bool {
         target,
         OpTarget::Conv1d
             | OpTarget::Conv2d
-            | OpTarget::DepthwiseConv2d
             | OpTarget::ConvTranspose2d
             | OpTarget::MaxPool2d
             | OpTarget::AvgPool2d
@@ -188,20 +186,8 @@ pub(crate) fn is_conv_weight_source(target: &OpTarget) -> bool {
     matches!(
         target,
         OpTarget::Conv2d
-            | OpTarget::DepthwiseConv2d
             | OpTarget::TosaConv2d
             | OpTarget::TosaConv3d
             | OpTarget::TosaDepthwiseConv2d
-    )
-}
-
-pub(crate) fn is_weight_layout_passthrough(target: &OpTarget) -> bool {
-    matches!(
-        target,
-        OpTarget::TosaTranspose
-            | OpTarget::Permute
-            | OpTarget::Reshape
-            | OpTarget::TosaReshape
-            | OpTarget::View
     )
 }

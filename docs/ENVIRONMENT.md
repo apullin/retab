@@ -50,9 +50,8 @@ instead takes the first readable string value.
 | `RETAB_DEBUG`, `RETAB_LOG`, `TOSA_ENGINE_DEBUG`, `TOSA_ENGINE_LOG` | `runner_logging_enabled`; `src/runner_logging.rs`, called by the pass runner in `src/fx_ir.rs` | Presence of any name enables pass-start and pass-result logging to stderr. The result is cached on first use. |
 | `RETAB_DEBUG`, `TOSA_ENGINE_DEBUG` | `retab_debug_enabled`; `serialize/mod.rs`, `serialize/collection.rs`, `serialize/flatbuffer.rs`, `serialize/visitors/mod.rs`, `serialize/visitors/reductions/sum_ops.rs` | Presence enables serializer allocation, collection, assembly, missing-emitter, and sum diagnostics. Cached independently on first use. |
 | `RETAB_TABLE_DEBUG`, `ARM_TABLE_DEBUG` | `table_debug_enabled`; `src/fx_insert_table_ops_ir.rs` | Presence enables table-generation diagnostics to stderr. Unset disables it. |
-| `RETAB_DEBUG_SLICE`, `ARM_TOSA_ENGINE_DEBUG_SLICE` | `debug_slice_enabled`; `serialize/visitors/layout.rs`, `serialize/visitors/indexing.rs` | Exactly `1` enables slice/indexing diagnostics. Unset disables it. |
+| `RETAB_DEBUG_SLICE`, `ARM_TOSA_ENGINE_DEBUG_SLICE` | `debug_slice_enabled`; `serialize/visitors/indexing.rs` | Exactly `1` enables slice/indexing diagnostics. Unset disables it. |
 | `RETAB_DEBUG_CAT`, `ARM_TOSA_ENGINE_DEBUG_CAT` | `debug_cat_enabled`; `serialize/visitors/tensor_ops.rs` | Exactly `1` enables concatenation diagnostics. Unset disables it. |
-| `RETAB_DEBUG_LAYOUT`, `ARM_TOSA_ENGINE_DEBUG_LAYOUT` | `debug_layout_enabled`; `serialize/visitors/layout.rs` | Exactly `1` enables layout diagnostics. Unset disables it. |
 | `RETAB_DEBUG_NODE`, `ARM_TOSA_ENGINE_DEBUG_NODE` | `debug_node_probe`; `src/fx_ir.rs`, `serialize/visitors/mod.rs` | Name substring to trace matching live nodes after passes and at serialization. The first readable value wins; an empty substring matches every node. Unset disables the probe. |
 
 Set cached logging/debug variables before the first lowering call. Changing

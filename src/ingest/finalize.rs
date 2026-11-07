@@ -186,7 +186,6 @@ fn is_accumulator_op(target: &OpTarget) -> bool {
     matches!(
         target,
         OpTarget::Conv2d
-            | OpTarget::DepthwiseConv2d
             | OpTarget::TosaConv2d
             | OpTarget::TosaDepthwiseConv2d
             | OpTarget::TosaConv3d

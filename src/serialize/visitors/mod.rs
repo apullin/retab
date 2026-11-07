@@ -15,7 +15,6 @@ mod emit_result;
 mod emitter;
 mod graph_utils;
 mod indexing;
-mod layout;
 mod math;
 mod matmul;
 mod nn;
@@ -62,7 +61,6 @@ use dtype_quant::{
 };
 pub(crate) use emit_result::EmitResult;
 use graph_utils::*;
-use layout::*;
 use op_utils::*;
 use rounding::*;
 pub(crate) use shape_utils::actual_tensor_shape;

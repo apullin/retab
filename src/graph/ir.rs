@@ -62,7 +62,6 @@ pub enum OpTarget {
     Eye,
     Pad,
     ConvTranspose2d,
-    DepthwiseConv2d,
     Addmm,
     Bmm,
     Embedding,

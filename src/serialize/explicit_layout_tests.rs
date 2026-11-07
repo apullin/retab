@@ -7,10 +7,7 @@
 //! ingest (design F2). The nodes these rewrites create carry rc4's dtypes instead: a TOSA
 //! conv is int32 and inherits the aten conv's qparams, and its layout permutes have none.
 
-use super::collection::{
-    check_explicit_layout_invariants, collect_regions, reject_aten_spatial_ops,
-    SerializedGraphItems,
-};
+use super::collection::{check_explicit_layout_invariants, collect_regions, SerializedGraphItems};
 use super::tosa_types::{Attribute, DType, Op, ResizeMode, TosaOperator, TosaTensor};
 use super::visitors;
 use crate::fx_ir::{
@@ -979,20 +976,6 @@ fn aten_spatial_ops_send_explicit_graphs_to_stock() {
             "{target}: {error}"
         );
     }
-
-    // No aten string maps to DepthwiseConv2d, so check it on a serializer graph.
-    let mut graph = Graph::new();
-    graph.create_node(
-        OpType::CallFunction,
-        OpTarget::DepthwiseConv2d,
-        smallvec![],
-        Vec::new(),
-        NodeMeta::new(TensorInfo::new(&[1, 2, 4, 4], IrDType::Int8)),
-        "dw".into(),
-    );
-    assert!(reject_aten_spatial_ops("cond", &graph)
-        .unwrap_err()
-        .contains("'dw' (DepthwiseConv2d) in region 'cond'"));
 }
 
 #[test]
