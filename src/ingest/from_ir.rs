@@ -117,8 +117,9 @@ fn graph_from_ir_ext(
         let op = map_op(ir_node.op);
         let target = if op == OpType::CallFunction {
             let parsed = parse_op_target(&ir_node.target);
-            // Mirror ingest: aten.convolution with transposed=True (arg 6) is a
-            // transpose-conv, not a plain conv2d.
+            // aten.convolution with transposed=True (arg 6) is a transposed conv. No aten
+            // conv reaches an emitter, so this only names it right in the stock-fallback
+            // reason of reject_aten_spatial_ops.
             if matches!(parsed, OpTarget::Conv2d)
                 && is_raw_aten_convolution_target(&ir_node.target)
                 && matches!(ir_node.args.get(6), Some(IrArg::Bool(true)))

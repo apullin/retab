@@ -38,9 +38,7 @@ pub(crate) fn is_layout_dtype_passthrough(target: &OpTarget) -> bool {
 pub(crate) fn is_accumulator_output(target: &OpTarget) -> bool {
     matches!(
         target,
-        OpTarget::Conv2d
-            | OpTarget::ConvTranspose2d
-            | OpTarget::Linear
+        OpTarget::Linear
             | OpTarget::Addmm
             | OpTarget::Matmul
             | OpTarget::Bmm
@@ -176,9 +174,6 @@ pub(crate) fn is_matmul_shape_op(target: &OpTarget) -> bool {
 pub(crate) fn is_conv_weight_source(target: &OpTarget) -> bool {
     matches!(
         target,
-        OpTarget::Conv2d
-            | OpTarget::TosaConv2d
-            | OpTarget::TosaConv3d
-            | OpTarget::TosaDepthwiseConv2d
+        OpTarget::TosaConv2d | OpTarget::TosaConv3d | OpTarget::TosaDepthwiseConv2d
     )
 }

@@ -7,19 +7,7 @@ use crate::graph::Graph;
 // Post-ingestion shape fixup
 // ---------------------------------------------------------------------------
 
-/// Fix output shapes for Reshape/View/Flatten nodes and their downstream conv.
-///
-/// The linear decomposition pass (`FxDecomposeLinearPass`) creates nodes whose
-/// meta (including `val` FakeTensor) is copied from the original linear node.
-/// This means the intermediate view_copy and convolution nodes have the linear
-/// output's shape (e.g. `[1, 10]`) instead of their actual output shapes:
-///   - view_copy(input, [1, 1568, 1, 1]) should have shape [1, 1568, 1, 1]
-///   - view_copy(weights, [10, 1568, 1, 1]) should have shape [10, 1568, 1, 1]
-///   - conv2d(input_4d, weight_4d, ...) should have 4D output shape
-///   - view_copy(conv_out, [1, 10]) should have shape [1, 10]
-///
-/// For reshape-like ops: read the target shape from args[1] (IntList).
-/// For conv: compute output shape from input shape, weight shape, and params.
+/// `shape` with its one -1 (if any) resolved against `input_shape`'s element count.
 fn resolve_inferred_reshape_shape(shape: &[i64], input_shape: &[i64]) -> Option<Vec<i64>> {
     let negative_positions: Vec<usize> = shape
         .iter()
@@ -49,6 +37,7 @@ fn resolve_inferred_reshape_shape(shape: &[i64], input_shape: &[i64]) -> Option<
     Some(resolved)
 }
 
+/// Give each Reshape/View/Flatten node its target shape (`args[1]`) as its val.
 fn fixup_reshape_shapes(graph: &mut Graph) {
     let all_ids = graph.all_node_ids();
     for node_id in &all_ids {
@@ -92,88 +81,6 @@ fn fixup_reshape_shapes(graph: &mut Graph) {
             }
         }
     }
-
-    // Also fix Conv2d nodes whose output shape doesn't match their inputs.
-    let all_ids2 = graph.all_node_ids();
-    for node_id in &all_ids2 {
-        let (input_id, weight_id, current_shape_len) = {
-            let Some(node) = graph.node(*node_id) else {
-                continue;
-            };
-            if node.op != OpType::CallFunction {
-                continue;
-            }
-            if !matches!(node.target, OpTarget::Conv2d) {
-                continue;
-            }
-            (
-                node.args.first().and_then(Arg::as_node),
-                node.args.get(1).and_then(Arg::as_node),
-                node.meta.val.shape_len,
-            )
-        };
-
-        if current_shape_len == 4 {
-            continue;
-        }
-
-        if let (Some(input_id), Some(weight_id)) = (input_id, weight_id) {
-            let (input_shape, weight_shape) = {
-                let input_node = graph.node(input_id);
-                let weight_node = graph.node(weight_id);
-                (
-                    input_node.map(|n| n.meta.val.shape_slice().to_vec()),
-                    weight_node.map(|n| n.meta.val.shape_slice().to_vec()),
-                )
-            };
-
-            if let (Some(ishape), Some(wshape)) = (input_shape, weight_shape) {
-                if ishape.len() == 4 && wshape.len() == 4 {
-                    let node = graph.node(*node_id).unwrap();
-                    let stride = node
-                        .args
-                        .get(3)
-                        .and_then(Arg::as_int_list)
-                        .map(Vec::from)
-                        .unwrap_or_else(|| vec![1, 1]);
-                    let padding = node
-                        .args
-                        .get(4)
-                        .and_then(Arg::as_int_list)
-                        .map(Vec::from)
-                        .unwrap_or_else(|| vec![0, 0]);
-                    let dilation = node
-                        .args
-                        .get(5)
-                        .and_then(Arg::as_int_list)
-                        .map(Vec::from)
-                        .unwrap_or_else(|| vec![1, 1]);
-
-                    let batch = ishape[0];
-                    let ih = ishape[1];
-                    let iw = ishape[2];
-                    let out_channels = wshape[0];
-                    let kh = wshape[1];
-                    let kw = wshape[2];
-                    let sh = if stride.len() >= 2 { stride[0] } else { 1 };
-                    let sw = if stride.len() >= 2 { stride[1] } else { 1 };
-                    let ph = if padding.len() >= 2 { padding[0] } else { 0 };
-                    let pw = if padding.len() >= 2 { padding[1] } else { 0 };
-                    let dh = if dilation.len() >= 2 { dilation[0] } else { 1 };
-                    let dw = if dilation.len() >= 2 { dilation[1] } else { 1 };
-
-                    let oh = (ih + 2 * ph - dh * (kh - 1) - 1) / sh + 1;
-                    let ow = (iw + 2 * pw - dw * (kw - 1) - 1) / sw + 1;
-
-                    let new_shape = [batch, oh, ow, out_channels];
-                    let dt = node.meta.val.dtype;
-                    if let Some(node_mut) = graph.node_mut(*node_id) {
-                        node_mut.meta.val = TensorInfo::new(&new_shape, dt);
-                    }
-                }
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -185,8 +92,7 @@ fn fixup_reshape_shapes(graph: &mut Graph) {
 fn is_accumulator_op(target: &OpTarget) -> bool {
     matches!(
         target,
-        OpTarget::Conv2d
-            | OpTarget::TosaConv2d
+        OpTarget::TosaConv2d
             | OpTarget::TosaDepthwiseConv2d
             | OpTarget::TosaConv3d
             | OpTarget::TosaTransposeConv2d
@@ -400,9 +306,6 @@ fn fixup_quantized_dtypes_once(graph: &mut Graph) {
                         | OpTarget::TosaIdentity
                         | OpTarget::Permute
                         | OpTarget::TosaTranspose
-                        | OpTarget::AvgPool2d
-                        | OpTarget::MaxPool2d
-                        | OpTarget::AdaptiveAvgPool2d
                         | OpTarget::TosaAvgPool2d
                         | OpTarget::TosaMaxPool2d
                 ) {
