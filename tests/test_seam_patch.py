@@ -22,12 +22,30 @@ def test_patch_then_unpatch_restores_stock_attributes():
     stock = {name: TOSABackend.__dict__[name] for name in ("preprocess", "_preprocess")}
     rp.patch_tosa_backend()
     try:
-        assert TOSABackend.__dict__["_preprocess"].__func__ is rp._all_rust_preprocess
+        installed = TOSABackend.__dict__["_preprocess"]
+        assert installed.__func__ is rp._preprocess
+        assert rp._is_retab_callable(installed)
         assert TOSABackend.__dict__["preprocess"] is stock["preprocess"]
     finally:
         rp.unpatch_tosa_backend()
     assert all(TOSABackend.__dict__[name] is value for name, value in stock.items())
     assert _tosa_backend_classes() == 1
+
+
+def test_patching_preprocess_by_name_works_while_retab_is_installed():
+    """rc4's misc/test_external_vela_blocks.py patches TOSABackend._preprocess by the
+    installed function's __name__, so RETAB's replacement keeps stock's name."""
+    from unittest.mock import patch
+
+    from retab.integration.executorch_arm import activated
+
+    assert TOSABackend._preprocess.__name__ == "_preprocess"
+    with activated():
+        installed = TOSABackend.__dict__["_preprocess"]
+        assert TOSABackend._preprocess.__name__ == "_preprocess"
+        with patch.object(TOSABackend, TOSABackend._preprocess.__name__, return_value="mocked"):
+            assert TOSABackend._preprocess(None, None) == "mocked"
+        assert TOSABackend.__dict__["_preprocess"] is installed
 
 
 def test_fast_paths_are_refused_until_rederived_on_rc4(monkeypatch):

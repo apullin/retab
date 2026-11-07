@@ -559,6 +559,23 @@ def _all_rust_preprocess(
 _all_rust_preprocess._retab_override = True
 
 
+def _preprocess(
+    edge_program: ExportedProgram, compile_spec: TosaCompileSpec
+) -> PreprocessResult:
+    """TOSABackend._preprocess while RETAB is installed: RETAB's lowering.
+
+    It carries stock's name, the way the Ethos-U guard keeps
+    EthosUBackend.preprocess's, because callers find the attribute through the
+    installed function's name: rc4's misc/test_external_vela_blocks.py patches
+    `patch.object(TOSABackend, TOSABackend._preprocess.__name__, ...)`.
+    """
+    return _all_rust_preprocess(edge_program, compile_spec)
+
+
+_preprocess.__qualname__ = "TOSABackend._preprocess"
+_preprocess._retab_override = True
+
+
 # -- Public API: backend override and compatibility fallback -----------------
 
 
@@ -642,9 +659,10 @@ def patch_tosa_backend(*, fast_paths: bool = False):
     _capture_stock_tosa_backend()
     _install_ethos_u_unused_input_guard()
 
-    # Stock TOSABackend.preprocess and EthosUBackend both call TOSABackend._preprocess,
-    # so swapping that one attribute (keeping its name) routes every TOSA lowering here.
-    TOSABackend._preprocess = staticmethod(_all_rust_preprocess)
+    # Stock TOSABackend.preprocess, EthosUBackend and VgfBackend all call
+    # TOSABackend._preprocess, so swapping that one attribute routes every TOSA
+    # lowering here.
+    TOSABackend._preprocess = staticmethod(_preprocess)
     _install_parallel_backend_preprocess_multimethods()
     logger.info("[retab] Patched TOSABackend._preprocess (all_rust mode)")
 
