@@ -162,10 +162,3 @@ pub(crate) fn is_matmul_shape_op(target: &OpTarget) -> bool {
         OpTarget::Matmul | OpTarget::Bmm | OpTarget::TosaMatmul
     )
 }
-
-pub(crate) fn is_conv_weight_source(target: &OpTarget) -> bool {
-    matches!(
-        target,
-        OpTarget::TosaConv2d | OpTarget::TosaConv3d | OpTarget::TosaDepthwiseConv2d
-    )
-}

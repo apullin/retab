@@ -1,32 +1,13 @@
-use std::collections::HashMap;
-
-use crate::graph::ir::{Arg, Node};
-use crate::graph::Graph;
+use crate::graph::ir::Node;
 use crate::store::TensorData;
 
-use super::op_semantics;
 use super::tosa_types::{DType, TosaTensor};
 use super::visitors::ir_dtype_to_tosa;
 
-pub(super) struct TensorDeclarationContext {
-    dtype_overrides: HashMap<String, DType>,
-}
-
-impl TensorDeclarationContext {
-    pub(super) fn new(graph: &Graph) -> Self {
-        Self {
-            dtype_overrides: collect_tensor_dtype_overrides(graph),
-        }
-    }
-
-    pub(super) fn runtime_placeholder(&self, node: &Node) -> TosaTensor {
-        let (shape, dtype) = placeholder_decl(node);
-        make_graph_tensor(node.name.clone(), shape, dtype, Vec::new())
-    }
-
-    pub(super) fn const_placeholder(&self, node: &Node, tensor_data: &TensorData) -> TosaTensor {
-        serialize_const_placeholder(node, tensor_data, &self.dtype_overrides)
-    }
+/// A runtime input's tensor, at its val's shape and dtype.
+pub(super) fn runtime_placeholder(node: &Node) -> TosaTensor {
+    let (shape, dtype) = placeholder_decl(node);
+    make_graph_tensor(node.name.clone(), shape, dtype, Vec::new())
 }
 
 pub(super) fn raw_i32_shape(node: &Node) -> Vec<i32> {
@@ -218,34 +199,6 @@ fn widen_int32_data_to_int48(data: &[u8]) -> Vec<u8> {
     widened
 }
 
-fn has_int48_conv_accumulator(node: &Node) -> bool {
-    node.meta.tosa_special_dtype == Some(crate::graph::ir::DType::Int48)
-        || node.meta.val.dtype == crate::graph::ir::DType::Int48
-        || node
-            .meta
-            .input_qparams
-            .iter()
-            .any(|(_, qp)| qp.dtype == crate::graph::ir::DType::Int16)
-}
-
-fn collect_tensor_dtype_overrides(graph: &Graph) -> HashMap<String, DType> {
-    let mut overrides = HashMap::new();
-    for &nid in &graph.order {
-        let Some(node) = graph.node(nid) else {
-            continue;
-        };
-        if !op_semantics::is_conv_weight_source(&node.target) || !has_int48_conv_accumulator(node) {
-            continue;
-        }
-        if let Some(Arg::Node(bias_id)) = node.args.get(2) {
-            if let Some(bias) = graph.node(*bias_id) {
-                overrides.insert(bias.name.clone(), DType::Int48);
-            }
-        }
-    }
-    overrides
-}
-
 fn make_graph_tensor(name: String, shape: Vec<i32>, dtype: DType, data: Vec<u8>) -> TosaTensor {
     if data.is_empty() {
         TosaTensor::new(&name, shape, dtype)
@@ -258,18 +211,16 @@ fn placeholder_decl(node: &Node) -> (Vec<i32>, DType) {
     (raw_i32_shape(node), ir_dtype_to_tosa(node.meta.val.dtype))
 }
 
-/// rc4's conv rewrite already put conv weights in TOSA's OHWI/HWCM/ODHWI layouts, so a
-/// constant is not permuted for its consumer (P2 design B1).
-fn serialize_const_placeholder(
-    node: &Node,
-    tensor_data: &TensorData,
-    dtype_overrides: &HashMap<String, DType>,
-) -> TosaTensor {
+/// A constant's tensor, at its stored shape, typed by its `tosa_special_dtype` when it has
+/// one (an INT4 weight; an INT48 conv bias, which IrRewriteConv and captured_conv mark),
+/// else by its stored dtype. rc4's conv rewrite already put conv weights in TOSA's
+/// OHWI/HWCM/ODHWI layouts, so a constant is not permuted for its consumer (P2 design B1).
+pub(super) fn const_placeholder(node: &Node, tensor_data: &TensorData) -> TosaTensor {
     let store_dtype = ir_dtype_to_tosa(tensor_data.dtype);
-    let tensor_dtype = dtype_overrides
-        .get(&node.name)
-        .copied()
-        .or_else(|| node.meta.tosa_special_dtype.map(ir_dtype_to_tosa))
+    let tensor_dtype = node
+        .meta
+        .tosa_special_dtype
+        .map(ir_dtype_to_tosa)
         .unwrap_or(store_dtype);
     let final_shape: Vec<i32> = tensor_data.shape.iter().map(|&d| d as i32).collect();
     let final_data = match (tensor_dtype, store_dtype) {
@@ -353,8 +304,7 @@ mod tests {
             shape: vec![],
             dtype: crate::graph::ir::DType::Int8,
         };
-        let context = TensorDeclarationContext::new(&Graph::new());
-        let serialized = context.const_placeholder(&node, &tensor);
+        let serialized = const_placeholder(&node, &tensor);
         assert_eq!(serialized.shape, Vec::<i32>::new());
     }
 }
