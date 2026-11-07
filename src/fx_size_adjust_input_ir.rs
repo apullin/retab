@@ -99,10 +99,6 @@ impl IrPass for IrSizeAdjustInputPass {
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
         for id in graph.live_call_function_ids() {
-            // Skip nodes marked with skip_size_adjust
-            if graph.nodes[id].meta.extra_bool("skip_size_adjust") == Some(true) {
-                continue;
-            }
             let Some(target_kind) = size_adjust_target_kind(&graph.nodes[id].target) else {
                 continue;
             };

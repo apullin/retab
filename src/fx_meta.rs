@@ -156,7 +156,7 @@ pub struct NodeMeta {
     quant: QuantFacts,
     /// torch's dim order of the value, `meta["val"].dim_order()`.
     val_dim_order: Option<Vec<usize>>,
-    /// Arbitrary extra meta keys for passthrough (skip_size_adjust, do_not_fuse_duplicate, etc).
+    /// Arbitrary extra meta keys for passthrough (do_not_fuse_duplicate, etc).
     pub extras: HashMap<String, MetaValue>,
 }
 
@@ -244,9 +244,6 @@ impl NodeMeta {
         let mut extras = HashMap::new();
         if let Some(b) = meta_attrs.optional::<bool>("do_not_fuse_duplicate") {
             extras.insert("do_not_fuse_duplicate".into(), MetaValue::Bool(b));
-        }
-        if let Some(b) = meta_attrs.optional::<bool>("skip_size_adjust") {
-            extras.insert("skip_size_adjust".into(), MetaValue::Bool(b));
         }
         if let Some(custom) = meta_attrs.value("custom") {
             if let Some(ann_info) = items(&custom).key("_arm_annotation_info") {
