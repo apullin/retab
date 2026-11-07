@@ -192,6 +192,15 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         Ir(Box::new(
             crate::layout::match_arg_ranks::IrMatchArgRanksPass,
         )),
+        // DecomposeBoolEqualityPass (APM:672): a bool eq becomes
+        // logical_not(logical_xor), since TOSA's EQUAL takes no bool inputs (APU-123).
+        // rc4 runs it right after DecomposeNotEqual (APM:671). RETAB runs
+        // IrDecomposeNotEqual earlier, before IrReplaceScalarWithTensor, so the eq a
+        // bool ne leaves still reaches this slot. It follows IrMatchArgRanks, so
+        // logical_xor reads rank-matched operands.
+        Ir(Box::new(
+            crate::fx_decompose_bool_equality_ir::IrDecomposeBoolEqualityPass,
+        )),
         Effectful(Box::new(
             crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEffectPass,
         )),
@@ -593,6 +602,12 @@ mod tests {
                 assert_eq!(names[full_like + 1], "IrMatchArgRanks", "{spec}");
                 assert_eq!(count("IrMatchArgRanks"), 2, "{spec}");
 
+                // APM:672, DecomposeBoolEquality, right after that IrMatchArgRanks, and
+                // after IrDecomposeNotEqual, which RETAB runs before the scalar rewrite.
+                assert_eq!(names[full_like + 2], "IrDecomposeBoolEquality", "{spec}");
+                assert_eq!(count("IrDecomposeBoolEquality"), 1, "{spec}");
+                assert!(position("IrDecomposeNotEqual") < full_like, "{spec}");
+
                 // APM:695-700: SizeAdjustInput, RewriteAvgPool2d, then the constant
                 // folds in the IR.
                 let size_adjust = position("IrSizeAdjustInput");
@@ -727,6 +742,96 @@ mod tests {
         assert_eq!(mask.target, "aten.view_copy.default");
         assert_eq!(graph.node_shape(mask.id), Some([1, 2, 5].as_slice()));
         assert_eq!(mask.arg_node(0), Some(live_node(&graph, "mask").id));
+    }
+
+    /// A bool ne and a bool eq with a lower-rank operand, through the same steps as
+    /// above, in the parent and in a region (APU-123). Neither reaches the serializer
+    /// as EQUAL, which TOSA defines for numeric inputs only: as in rc4,
+    /// IrDecomposeNotEqual makes the ne logical_not(eq), IrMatchArgRanks views the
+    /// eq's [4] operand to [1, 1, 4], and IrDecomposeBoolEquality (APM:672) splits
+    /// each eq into logical_xor and logical_not.
+    #[test]
+    fn bool_eq_and_ne_lower_to_logical_ops_in_parent_and_regions() {
+        use crate::fx_ir::{IrArg, IrGraph};
+        use crate::test_ir::{call, live_node, output, placeholder};
+
+        fn step_name(step: &PipelineStep) -> &str {
+            match step {
+                PipelineStep::Ir(pass) => pass.name(),
+                PipelineStep::Effectful(pass) => pass.name(),
+            }
+        }
+
+        // U85's spec (`EthosUCompileSpec._tosa_spec_for_target`).
+        let config = PipelineConfig::from_tosa_spec("TOSA-1.0+INT+int16+int4+cf");
+        for steps in [
+            lowering_steps(true, &config),
+            build_ir_cond_submodule_pipeline(&config),
+        ] {
+            let mut graph = IrGraph::empty();
+            let a = placeholder(&mut graph, "a", [2, 3, 4], "torch.bool");
+            let b = placeholder(&mut graph, "b", [4], "torch.bool");
+            let c = placeholder(&mut graph, "c", [2, 3, 4], "torch.bool");
+            let eq = call(
+                &mut graph,
+                "eq",
+                "aten.eq.Tensor",
+                vec![IrArg::Node(a), IrArg::Node(b)],
+                [2, 3, 4],
+                "torch.bool",
+            );
+            let ne = call(
+                &mut graph,
+                "ne",
+                "aten.ne.Tensor",
+                vec![IrArg::Node(eq), IrArg::Node(c)],
+                [2, 3, 4],
+                "torch.bool",
+            );
+            output(&mut graph, ne);
+
+            let position = |pass: &str, from: usize| {
+                from + steps[from..]
+                    .iter()
+                    .position(|step| step_name(step) == pass)
+                    .unwrap_or_else(|| panic!("{pass} missing"))
+            };
+            let start = position("IrDecomposeStridedSlice", 0);
+            let end = position("IrFuseZeroInputConstantsEp", start);
+            run_steps(&steps[start..end], &mut graph);
+
+            assert!(!graph
+                .live_nodes()
+                .any(|node| matches!(node.target.as_str(), "aten.eq.Tensor" | "aten.ne.Tensor")));
+            let arg = |name: &str, index: usize| {
+                graph.node(
+                    live_node(&graph, name).args[index]
+                        .as_node()
+                        .expect("a node"),
+                )
+            };
+            // The eq: logical_xor(a, view(b)), then logical_not.
+            let eq_xor = live_node(&graph, "eq_logical_xor");
+            assert_eq!(eq_xor.target, "aten.logical_xor.default");
+            assert_eq!(arg("eq_logical_xor", 0).name, "a");
+            let view = arg("eq_logical_xor", 1);
+            assert_eq!(view.target, "aten.view_copy.default");
+            assert_eq!(graph.node_shape(view.id), Some([1, 1, 4].as_slice()));
+            assert_eq!(arg("eq_logical_not", 0).name, "eq_logical_xor");
+            // The ne: logical_not(logical_not(logical_xor(eq, c))).
+            assert_eq!(arg("ne_eq_logical_xor", 0).name, "eq_logical_not");
+            assert_eq!(arg("ne_eq_logical_xor", 1).name, "c");
+            assert_eq!(arg("ne_eq_logical_not", 0).name, "ne_eq_logical_xor");
+            assert_eq!(arg("ne_logical_not", 0).name, "ne_eq_logical_not");
+            let out = graph
+                .live_nodes()
+                .find(|node| node.op == crate::fx_ir::NodeOp::Output)
+                .expect("an output");
+            assert_eq!(
+                out.args[0].as_node(),
+                Some(live_node(&graph, "ne_logical_not").id)
+            );
+        }
     }
 
     /// rc4's `linear_pc` graph at RewriteConvPass, a per-channel quantized Linear,

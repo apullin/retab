@@ -24,6 +24,7 @@ mod fx_decompose_adaptive_avgpool_ir;
 mod fx_decompose_addmm_ir;
 mod fx_decompose_as_strided_copy_ir;
 mod fx_decompose_avgpool_pad_ir;
+mod fx_decompose_bool_equality_ir;
 mod fx_decompose_cumsum_ir;
 mod fx_decompose_div_tensor_mode_ir;
 mod fx_decompose_embedding_ir;
