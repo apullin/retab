@@ -358,7 +358,7 @@ fn erase_dead_operand_chain(ir: &mut IrGraph, start: NodeId) {
         let removable = node.is_rescale()
             || is_view_like_target(&node.target)
             || is_permute_target(&node.target);
-        if !removable || !ir.live_user_ids(id).is_empty() {
+        if !removable || !ir.users(id).is_empty() {
             break;
         }
         dead = node.first_node_arg();

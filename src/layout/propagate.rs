@@ -954,7 +954,7 @@ impl<'c> Propagator<'c> {
         }
         next_nodes.nodes.iter().all(|&next_node| {
             reads.add(next_node);
-            graph.live_user_ids(next_node).iter().all(|&user| user == frontier)
+            graph.users(next_node).iter().all(|&user| user == frontier)
         })
     }
 

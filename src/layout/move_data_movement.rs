@@ -136,7 +136,7 @@ pub(crate) fn move_data_movement_ops_to_smaller_dtype(ctx: &mut LayoutCtx<'_>) -
             users_changed,
         } = match chosen {
             Move::BeforeRescale(rescale) => move_before_rescale(ctx, &mut before, node, rescale),
-            Move::AfterRescale(rescale) if ctx.graph().live_user_ids(node).len() == 1 => {
+            Move::AfterRescale(rescale) if ctx.graph().users(node).len() == 1 => {
                 move_after_rescale(ctx, &mut before, node, rescale)
             }
             Move::AfterRescale(rescale) => split_after_rescale(ctx, &mut before, node, rescale),

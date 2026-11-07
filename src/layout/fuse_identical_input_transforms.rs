@@ -419,7 +419,7 @@ fn inputs_share_transform_or_are_layout_invariant(
     }
     if !transforms
         .iter()
-        .all(|&input| graph.live_user_ids(input).iter().all(|&user| user == node))
+        .all(|&input| graph.users(input).iter().all(|&user| user == node))
     {
         return false;
     }

@@ -1410,7 +1410,7 @@ fn match_interleave_triple(ctx: &LayoutCtx<'_>, id: NodeId) -> Option<Triple> {
         return None;
     }
     let dim = pos - 1;
-    let expand = ctx.graph().live_user_ids(id)[0];
+    let expand = ctx.graph().users(id)[0];
     if ctx.node(expand).target != EXPAND_COPY || live_user_count(ctx, expand) != 1 {
         return None;
     }
@@ -1434,7 +1434,7 @@ fn match_interleave_triple(ctx: &LayoutCtx<'_>, id: NodeId) -> Option<Triple> {
     if scale < 1 {
         return None;
     }
-    let view = ctx.graph().live_user_ids(expand)[0];
+    let view = ctx.graph().users(expand)[0];
     if !VIEW_OPS.contains(&ctx.node(view).target.as_str()) {
         return None;
     }
@@ -1629,7 +1629,7 @@ fn numel(ctx: &LayoutCtx<'_>, id: NodeId) -> Option<i64> {
 }
 
 fn live_user_count(ctx: &LayoutCtx<'_>, id: NodeId) -> usize {
-    ctx.graph().live_user_ids(id).len()
+    ctx.graph().users(id).len()
 }
 
 /// `node.users`, in torch.fx's insertion order (see the module docs).
@@ -1926,7 +1926,7 @@ fn subgraph_edges_are_current(
     );
     for (input, out) in outgoing {
         if !is_permute_target(&ctx.node(out).target)
-            || !ctx.graph().live_user_ids(input).contains(&out)
+            || !ctx.graph().users(input).contains(&out)
             || bypassed.contains(&out)
         {
             return false;

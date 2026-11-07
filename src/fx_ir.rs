@@ -819,7 +819,7 @@ impl IrGraph {
 
     /// Every live node that references `id` in its args or kwargs, once each, in
     /// ascending id order.
-    fn exact_users(&self, id: NodeId) -> &[NodeId] {
+    pub fn users(&self, id: NodeId) -> &[NodeId] {
         match self.users.get(id) {
             Some(users) => users,
             None => self.pending_users.get(&id).map_or(&[], Vec::as_slice),
@@ -834,10 +834,10 @@ impl IrGraph {
         self.live_nodes().count()
     }
 
-    /// Every live node that references `id` in its args or kwargs, once each, in
-    /// ascending id order. O(users of `id`).
+    /// [`Self::users`] as an owned Vec, for a caller that edits the graph while it
+    /// walks them. O(users of `id`).
     pub fn live_user_ids(&self, id: NodeId) -> Vec<NodeId> {
-        self.exact_users(id).to_vec()
+        self.users(id).to_vec()
     }
 
     pub fn live_node_ids(&self) -> Vec<NodeId> {
@@ -1103,18 +1103,18 @@ impl IrGraph {
     }
 
     pub fn has_live_users(&self, id: NodeId) -> bool {
-        !self.exact_users(id).is_empty()
+        !self.users(id).is_empty()
     }
 
     pub fn single_live_user(&self, id: NodeId) -> Option<NodeId> {
-        match self.exact_users(id) {
+        match self.users(id) {
             [user] => Some(*user),
             _ => None,
         }
     }
 
     pub fn live_call_function_users(&self, id: NodeId) -> Vec<NodeId> {
-        self.exact_users(id)
+        self.users(id)
             .iter()
             .copied()
             .filter(|&user_id| self.nodes[user_id].op == NodeOp::CallFunction)
@@ -1124,7 +1124,7 @@ impl IrGraph {
     /// Live getitem nodes whose first arg is `id`, in ascending id order, with their
     /// index arg (default 0).
     pub fn live_getitem_users(&self, id: NodeId) -> Vec<(NodeId, i64)> {
-        self.exact_users(id)
+        self.users(id)
             .iter()
             .map(|&user_id| &self.nodes[user_id])
             .filter(|node| node.is_getitem())

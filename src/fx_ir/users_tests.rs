@@ -377,7 +377,7 @@ fn rewire_and_query(graph: &mut IrGraph, edits: usize, seed: u64) -> usize {
         let user = 1 + rng.below(graph.nodes.len() - 1);
         let operand = rng.below(user);
         graph.set_arg(user, rng.below(2), IrArg::Node(operand));
-        seen += graph.live_user_ids(operand).len();
+        seen += graph.users(operand).len();
     }
     seen
 }

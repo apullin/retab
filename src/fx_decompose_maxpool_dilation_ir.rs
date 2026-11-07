@@ -68,7 +68,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                     match user.args.get(1).and_then(|arg| arg.as_int()) {
                         Some(0) => value_user = Some(user_id),
                         Some(_) => {
-                            if !graph.live_user_ids(user_id).is_empty() {
+                            if !graph.users(user_id).is_empty() {
                                 unsupported = true;
                                 break;
                             }

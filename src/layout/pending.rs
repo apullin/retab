@@ -334,7 +334,7 @@ mod tests {
         let (mut g, t) = sixteen_bit_graph();
         let mut ctx = LayoutCtx::new(g.graph_mut());
         split_table_rescales(&mut ctx);
-        let rescale = ctx.graph().live_user_ids(t)[0];
+        let rescale = ctx.graph().users(t)[0];
         let meta = ctx.node(t).meta.cloned_with_val(vec![6], "torch.int32");
         let view = ctx.inserting_after(t, |ctx| {
             ctx.call_function("view", VIEW, vec![node(t), ints(&[6])], meta)

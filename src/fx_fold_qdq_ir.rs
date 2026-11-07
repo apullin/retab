@@ -1060,7 +1060,7 @@ mod tests {
             assert!(graph.node(out_q).alive);
             assert!(matches!(graph.node(binary).args[0], IrArg::Node(id) if id == x_dq));
             assert!(matches!(graph.node(binary).args[1], IrArg::Node(id) if id == y));
-            assert!(graph.live_user_ids(binary).contains(&out_q));
+            assert!(graph.users(binary).contains(&out_q));
         }
     }
 
@@ -1123,7 +1123,7 @@ mod tests {
                 matches!(graph.node(binary).args[1], IrArg::Node(id) if id == y),
                 "target {target}"
             );
-            assert!(graph.live_user_ids(binary).contains(&out_q), "target {target}");
+            assert!(graph.users(binary).contains(&out_q), "target {target}");
         }
     }
 

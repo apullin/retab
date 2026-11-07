@@ -1949,7 +1949,7 @@ fn a_fallback_stops_after_the_convs_before_it() {
         }
         if failing == 3 {
             let projection = calls(&graph, CONV2D)[1];
-            assert_eq!(graph.live_user_ids(projection).len(), 2, "{case}");
+            assert_eq!(graph.users(projection).len(), 2, "{case}");
         }
         replay::snapshot(&graph).expect("a valid graph");
     }

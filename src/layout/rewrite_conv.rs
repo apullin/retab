@@ -1763,7 +1763,7 @@ pub(crate) fn separate_u55_a16w8_output_rescales(
     tosa_op: NodeId,
     node_order: &HashMap<NodeId, usize>,
 ) {
-    if ctx.graph().live_user_ids(tosa_op).len() < 2 {
+    if ctx.graph().users(tosa_op).len() < 2 {
         return;
     }
     let Some(rescale_users) = deduplicate_a16w8_output_rescales(ctx, tosa_op, node_order) else {
