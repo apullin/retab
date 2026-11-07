@@ -199,7 +199,7 @@ emitted in stock's pre-order: cond branches as `[1, 2]`, while loops as
 
 [../src/serialize/mod.rs](../src/serialize/mod.rs) coordinates serialization
 and clears per-serialization shape/dtype caches. The implementation is split
-across `collection.rs`, `constant_pool.rs`, `tensor_layout.rs`,
+across `collection.rs`, `constant_pool.rs`, `tensor_decl.rs`,
 `attribute_flatbuffer.rs`, and `flatbuffer.rs`.
 
 `serialize/visitors/mod.rs` builds a domain-registered emitter dispatch table

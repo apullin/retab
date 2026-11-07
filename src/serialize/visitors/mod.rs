@@ -26,7 +26,6 @@ mod tensor_ops;
 
 pub use emitter::*;
 
-use super::tensor_layout::permute_shape;
 use super::tosa_types::{
     AbsAttribute, AddAttribute, ArgMaxAttribute, ArithmeticRightShiftAttribute, Attribute,
     AvgPool2dAttribute, BitwiseAndAttribute, BitwiseNotAttribute, BitwiseOrAttribute,

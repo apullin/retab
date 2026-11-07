@@ -5,7 +5,7 @@ use crate::graph::Graph;
 use crate::store::TensorStore;
 
 use super::constant_pool::ConstantPool;
-use super::tensor_layout;
+use super::tensor_decl;
 use super::tosa_types::{
     Attribute, ConstShapeAttribute, Op, ReshapeAttribute, TosaOperator, TosaShape, TosaTensor,
 };
@@ -107,7 +107,7 @@ fn collect_graph_items(
                 let name = &node.name;
 
                 if let Some(tensor_data) = store.get(name) {
-                    tensors.push(tensor_layout::const_placeholder(node, tensor_data));
+                    tensors.push(tensor_decl::const_placeholder(node, tensor_data));
                     operators.push(TosaOperator::new(
                         tosa_types::Op::Const,
                         Attribute::Const(tosa_types::ConstAttribute {}),
@@ -115,7 +115,7 @@ fn collect_graph_items(
                         vec![name.clone()],
                     ));
                 } else {
-                    tensors.push(tensor_layout::runtime_placeholder(node));
+                    tensors.push(tensor_decl::runtime_placeholder(node));
                     input_names.push(name.clone());
                 }
             }

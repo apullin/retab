@@ -88,6 +88,21 @@ fn first_input_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<
     ))
 }
 
+/// `shape` permuted by `perms`; None when they don't fit.
+pub(super) fn permute_shape(shape: &[i32], perms: &[i32]) -> Option<Vec<i32>> {
+    if shape.len() != perms.len() {
+        return None;
+    }
+    perms
+        .iter()
+        .map(|&axis| {
+            usize::try_from(axis)
+                .ok()
+                .and_then(|axis| shape.get(axis).copied())
+        })
+        .collect()
+}
+
 pub(super) fn transpose_perms(node: &Node) -> Vec<i32> {
     let perms = arg_or_kwarg_i32_list(node, 1, "dims");
     let rank = perms.len() as i32;
