@@ -101,6 +101,8 @@ def test_parallel_workers_return_data_store_output_intact(monkeypatch):
     except ValueError:
         pytest.skip("the fork start method is unavailable")
     monkeypatch.setenv("RETAB_PARALLEL_BACKEND_PREPROCESS_WORKERS", "2")
+    # A TOSA dump path forces the serial path, which this test must not take.
+    monkeypatch.delenv("RETAB_DUMP_TOSA", raising=False)
     spec = types.SimpleNamespace(_get_intermediate_path=lambda: None)
     multimethod = rp._make_parallel_backend_preprocess_multimethod(lambda specs: spec).__get__(
         None, _ExternalBlocksBackend
