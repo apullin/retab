@@ -30,7 +30,6 @@ pub(crate) fn is_layout_dtype_passthrough(target: &OpTarget) -> bool {
             | OpTarget::Expand
             | OpTarget::Contiguous
             | OpTarget::TosaReshape
-            | OpTarget::TosaTranspose
             | OpTarget::TosaIdentity
     )
 }
@@ -107,7 +106,7 @@ pub(crate) fn is_qdq_shape_passthrough(target: &OpTarget) -> bool {
 }
 
 pub(crate) fn is_transpose_shape_op(target: &OpTarget) -> bool {
-    matches!(target, OpTarget::TosaTranspose | OpTarget::Permute)
+    matches!(target, OpTarget::Permute)
 }
 
 pub(crate) fn is_slice_shape_op(target: &OpTarget) -> bool {
@@ -124,10 +123,6 @@ pub(crate) fn is_aten_sum(target: &OpTarget) -> bool {
 
 /// TOSA-dialect ops whose val is their TOSA shape, so the serializer reads it as is
 /// rather than recomputing it from their arguments (P2 design §4.2 G1, critique B1).
-///
-/// TRANSPOSE is not one of them. No pass creates one (permutes stay
-/// `aten.permute_copy`, design §1c), and recomputing a TRANSPOSE's shape from its input,
-/// as for a permute, is right whether or not its val is the TOSA shape.
 pub(crate) fn has_explicit_tosa_shape_val(target: &OpTarget) -> bool {
     matches!(
         target,

@@ -11,7 +11,6 @@ pub fn register(table: &mut EmitterTable) {
         (OpTarget::Eye, emit_eye),
         (OpTarget::ScalarTensor, emit_scalar_tensor),
         (OpTarget::TosaResize, emit_tosa_resize),
-        (OpTarget::TosaTranspose, emit_transpose),
         (OpTarget::TosaReshape, emit_reshape),
         (OpTarget::TosaConcat, emit_concat),
         (OpTarget::Expand, emit_expand),
@@ -601,21 +600,6 @@ pub(super) fn emit_const(ctx: &EmitContext) -> EmitResult {
         vec![],
     );
     result
-}
-
-pub(super) fn emit_transpose(ctx: &EmitContext) -> EmitResult {
-    let graph = ctx.graph;
-    let node = ctx.node;
-    let store = ctx.store;
-    let mut spec = ParsedShapeTransformSpec::parse(graph, store, node);
-    spec.output_shape = transposed_tensor_shape(graph, store, node).unwrap_or(spec.output_shape);
-    emit_shape_transform(
-        spec,
-        Op::Transpose,
-        Attribute::Transpose(TransposeAttribute {
-            perms: transpose_perms(node),
-        }),
-    )
 }
 
 pub(super) fn emit_reshape(ctx: &EmitContext) -> EmitResult {

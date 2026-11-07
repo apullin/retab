@@ -41,22 +41,15 @@ mod tests {
     use crate::test_ir::{f32_call, f32_placeholder, output};
 
     #[test]
-    fn rewrites_static_slice_bounds_of_a_transposed_input() {
+    fn rewrites_static_slice_bounds() {
         let mut graph = IrGraph::empty();
-        let x = f32_placeholder(&mut graph, "x", [1, 3, 8, 10]);
-        let nhwc = f32_call(
-            &mut graph,
-            "nhwc",
-            "backend.tosa.TRANSPOSE.default",
-            vec![IrArg::Node(x), i64_list_arg(&[0, 2, 3, 1])],
-            [1, 8, 10, 3],
-        );
+        let x = f32_placeholder(&mut graph, "x", [1, 8, 10, 3]);
         let sliced = f32_call(
             &mut graph,
             "slice",
             "aten.slice_copy.Tensor",
             vec![
-                IrArg::Node(nhwc),
+                IrArg::Node(x),
                 IrArg::Int(1),
                 IrArg::Int(-6),
                 IrArg::Int(i64::MAX),

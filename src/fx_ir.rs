@@ -1015,15 +1015,12 @@ impl IrGraph {
         }
     }
 
-    /// `input`'s shape, derived from the operand of its chain of transposes and permutes
-    /// through their perms rather than read from their vals; None when a perm does not
-    /// fit.
+    /// `input`'s shape, derived from the operand of its chain of permutes through their
+    /// perms rather than read from their vals; None when a perm does not fit.
     pub(crate) fn logical_input_shape(&self, input: NodeId) -> Option<Vec<i64>> {
         let mut current = input;
         let mut permutations = Vec::new();
-        while crate::fx_target::is_tosa_transpose_target(&self.node(current).target)
-            || crate::fx_target::is_permute_target(&self.node(current).target)
-        {
+        while crate::fx_target::is_permute_target(&self.node(current).target) {
             permutations.push(self.node(current).arg_int_list(1)?);
             current = self.node(current).arg_node(0)?;
         }

@@ -23,7 +23,6 @@ const TOSA_TARGETS: &[(&str, OpTarget)] = &[
     ),
     ("backend.tosa.CONV2D.default", OpTarget::TosaConv2d),
     ("backend.tosa.CONV3D.default", OpTarget::TosaConv3d),
-    ("backend.tosa.TRANSPOSE.default", OpTarget::TosaTranspose),
     ("backend.tosa.MAX_POOL2D.default", OpTarget::TosaMaxPool2d),
     ("backend.tosa.AVG_POOL2D.default", OpTarget::TosaAvgPool2d),
     ("backend.tosa.RESHAPE.default", OpTarget::TosaReshape),

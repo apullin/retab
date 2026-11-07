@@ -274,13 +274,6 @@ pub(crate) fn is_permute_target(target: &str) -> bool {
     matches!(target, "aten.permute_copy.default" | "aten.permute.default")
 }
 
-pub(crate) fn is_tosa_transpose_target(target: &str) -> bool {
-    matches!(
-        target,
-        "backend.tosa.TRANSPOSE.default" | "tosa.TRANSPOSE.default"
-    )
-}
-
 pub(crate) fn is_boundary_rescale_target(target: &str) -> bool {
     matches!(
         classify_ir_target(target),
@@ -292,7 +285,6 @@ pub(crate) fn is_layout_passthrough_target(target: &str) -> bool {
     is_rank_changing_layout_target(target)
         || is_permute_target(target)
         || is_dim_transpose_target(target)
-        || is_tosa_transpose_target(target)
         || matches!(
             target,
             "aten.contiguous.default" | "backend.tosa.IDENTITY.default" | "tosa.IDENTITY.default"
@@ -647,7 +639,6 @@ mod tests {
             is_shape_only_constant_target,
             is_view_like_target,
             is_permute_target,
-            is_tosa_transpose_target,
             is_boundary_rescale_target,
             is_layout_passthrough_target,
             is_rank_changing_layout_target,
@@ -1008,7 +999,6 @@ mod tests {
                 "tosa.RESHAPE.default",
             ],
         );
-        assert!(is_tosa_transpose_target("backend.tosa.TRANSPOSE.default"));
         assert!(is_rank_changing_layout_target("aten.flatten.using_ints"));
         assert_false(is_rank_changing_layout_target, &["aten.transpose.int"]);
         assert_false(

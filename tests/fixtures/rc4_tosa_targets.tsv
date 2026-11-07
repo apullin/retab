@@ -88,5 +88,5 @@ backend.tosa.SUB_SHAPE.default	Other
 backend.tosa.TABLE.default	TosaTable
 backend.tosa.TANH.default	TosaTanh
 backend.tosa.TILE.default	Other
-backend.tosa.TRANSPOSE.default	TosaTranspose
+backend.tosa.TRANSPOSE.default	Other
 backend.tosa.TRANSPOSE_CONV2D.default	TosaTransposeConv2d

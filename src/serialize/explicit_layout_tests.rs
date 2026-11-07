@@ -1185,37 +1185,6 @@ fn assert_transposes_consistent(items: &SerializedGraphItems) {
     }
 }
 
-#[test]
-fn explicit_transposes_take_their_shape_from_their_input() {
-    // A TRANSPOSE's val was not its TOSA shape when dim-order logic made it: it permuted
-    // the logical input ([1, 2, 3, 4] here) rather than the [1, 3, 4, 2] the TRANSPOSE
-    // reads. The serializer recomputes the shape from the input, as it does for a permute,
-    // which is also right for a val that is the TOSA shape. D1 sees such a stale val.
-    let mut ir = IrGraph::empty();
-    let x = placeholder(&mut ir, "x", [1, 3, 4, 2], FLOAT32);
-    let transpose = call(
-        &mut ir,
-        "transpose",
-        "backend.tosa.TRANSPOSE.default",
-        vec![IrArg::Node(x), list(&[0, 3, 1, 2])],
-        [1, 4, 2, 3],
-        FLOAT32,
-    );
-    output(&mut ir, transpose);
-    let (graph, store) = ingest(&ir);
-    visitors::shape_utils::clear_shape_cache();
-    let error = check_explicit_layout_invariants("main", &graph, &store).unwrap_err();
-    assert!(
-        error.contains(
-            "'transpose' (TosaTranspose) has val [1, 4, 2, 3] but serializes as [1, 2, 3, 4]"
-        ),
-        "{error}"
-    );
-    let items = try_serialize_graph(graph, &store).unwrap();
-    assert_transposes_consistent(&items);
-    assert_eq!(tensor(&items, "transpose").shape, [1, 2, 3, 4]);
-}
-
 /// APU-135 P3: a 16-bit pending table that a layout pass left split (`layout::pending`).
 /// rc4's InsertTableOpsPass gives a 16-bit table that needs a left shift two nodes, a
 /// TABLE returning int32 and a RESCALE by `2**lshift` (insert_table_ops.py:400-417), and

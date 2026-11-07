@@ -305,7 +305,6 @@ fn fixup_quantized_dtypes_once(graph: &mut Graph) {
                         | OpTarget::TosaReshape
                         | OpTarget::TosaIdentity
                         | OpTarget::Permute
-                        | OpTarget::TosaTranspose
                         | OpTarget::TosaAvgPool2d
                         | OpTarget::TosaMaxPool2d
                 ) {

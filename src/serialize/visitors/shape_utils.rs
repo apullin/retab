@@ -84,12 +84,7 @@ fn first_input_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<
 }
 
 pub(super) fn transpose_perms(node: &Node) -> Vec<i32> {
-    let name = if node.target == OpTarget::Permute {
-        "dims"
-    } else {
-        "perms"
-    };
-    let perms = arg_or_kwarg_i32_list(node, 1, name);
+    let perms = arg_or_kwarg_i32_list(node, 1, "dims");
     let rank = perms.len() as i32;
     perms.into_iter().map(|dim| dim.rem_euclid(rank)).collect()
 }
@@ -342,8 +337,7 @@ pub(crate) fn actual_tensor_shape(graph: &Graph, store: &TensorStore, node: &Nod
 fn actual_tensor_shape_impl(graph: &Graph, store: &TensorStore, node: &Node) -> Vec<i32> {
     // A TOSA conv/pool/resize val is its TOSA shape (P2 design G1). The generic rules
     // below don't know these ops' operands: the broadcast rule would combine a conv's
-    // input, weight and bias, or AVG_POOL2D's input and zero points (critique B1). A
-    // TRANSPOSE keeps the input-permuting rule below.
+    // input, weight and bias, or AVG_POOL2D's input and zero points (critique B1).
     if op_semantics::has_explicit_tosa_shape_val(&node.target) {
         return raw_i32_shape(node);
     }
@@ -513,41 +507,39 @@ mod tests {
 
     #[test]
     fn regression_negative_permutation_dims_emit_nonnegative_transpose_perms() {
-        for target in [OpTarget::Permute, OpTarget::TosaTranspose] {
-            clear_shape_cache();
-            let mut graph = Graph::new();
-            let input = graph.create_node(
-                OpType::Placeholder,
-                OpTarget::Other("x".into()),
-                smallvec![],
-                Vec::new(),
-                meta(&[1, 2, 3, 5], DType::Float32),
-                "x".into(),
-            );
-            let transpose = graph.create_node(
-                OpType::CallFunction,
-                target,
-                smallvec![Arg::Node(input), Arg::IntList(smallvec![-4, -2, -1, -3])],
-                Vec::new(),
-                meta(&[1, 3, 5, 2], DType::Float32),
-                "transpose".into(),
-            );
-            let store = TensorStore::default();
-            let node = graph.node(transpose).unwrap();
-            let result = emit_node(&graph, transpose, node, &store).unwrap();
+        clear_shape_cache();
+        let mut graph = Graph::new();
+        let input = graph.create_node(
+            OpType::Placeholder,
+            OpTarget::Other("x".into()),
+            smallvec![],
+            Vec::new(),
+            meta(&[1, 2, 3, 5], DType::Float32),
+            "x".into(),
+        );
+        let transpose = graph.create_node(
+            OpType::CallFunction,
+            OpTarget::Permute,
+            smallvec![Arg::Node(input), Arg::IntList(smallvec![-4, -2, -1, -3])],
+            Vec::new(),
+            meta(&[1, 3, 5, 2], DType::Float32),
+            "transpose".into(),
+        );
+        let store = TensorStore::default();
+        let node = graph.node(transpose).unwrap();
+        let result = emit_node(&graph, transpose, node, &store).unwrap();
 
-            assert_eq!(result.operators.len(), 1);
-            assert_eq!(result.operators[0].op, Op::Transpose);
-            let Attribute::Transpose(attr) = &result.operators[0].attribute else {
-                panic!("expected transpose attribute");
-            };
-            assert_eq!(attr.perms, vec![0, 2, 3, 1]);
-            assert_eq!(result.tensors[0].shape, vec![1, 3, 5, 2]);
-            assert_eq!(
-                transposed_tensor_shape(&graph, &store, node),
-                Some(vec![1, 3, 5, 2])
-            );
-        }
+        assert_eq!(result.operators.len(), 1);
+        assert_eq!(result.operators[0].op, Op::Transpose);
+        let Attribute::Transpose(attr) = &result.operators[0].attribute else {
+            panic!("expected transpose attribute");
+        };
+        assert_eq!(attr.perms, vec![0, 2, 3, 1]);
+        assert_eq!(result.tensors[0].shape, vec![1, 3, 5, 2]);
+        assert_eq!(
+            transposed_tensor_shape(&graph, &store, node),
+            Some(vec![1, 3, 5, 2])
+        );
     }
 
     #[test]

@@ -112,7 +112,6 @@ pub enum OpTarget {
     TosaRescale,
     TosaResize,
     TosaReshape,
-    TosaTranspose,
     TosaAvgPool2d,
     TosaMaxPool2d,
     TosaClamp,
