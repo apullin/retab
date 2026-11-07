@@ -435,7 +435,6 @@ fn emit_tile_with_multiples(
         return result;
     }
 
-    let tile_multiples = multiples;
     let mut tile_input_name = input_name;
     let mut tile_input_shape = input_shape.clone();
     if input_shape.len() < tile_rank {
@@ -465,7 +464,7 @@ fn emit_tile_with_multiples(
 
     let output_shape: Vec<i32> = tile_input_shape
         .iter()
-        .zip(tile_multiples.iter())
+        .zip(multiples.iter())
         .map(|(&input_dim, &multiple)| input_dim.saturating_mul(multiple))
         .collect();
     if output_shape.len() != tile_rank {
@@ -473,7 +472,7 @@ fn emit_tile_with_multiples(
     }
 
     let multiples_name = format!("{}_multiples", node.name);
-    push_const_shape(&mut result, multiples_name.clone(), tile_multiples);
+    push_const_shape(&mut result, multiples_name.clone(), multiples);
     result.push_output_op(
         make_empty_tensor(
             primary_output_name(graph, node),
@@ -526,8 +525,8 @@ pub(super) fn emit_expand(ctx: &EmitContext) -> EmitResult {
     let raw_output_shape = raw_i32_shape(node);
     let input_shape = actual_tensor_shape(graph, store, input_node);
 
-    // Compute multiples in logical (pre-transpose) order so that
-    // emit_tile_with_multiples can permute them during transpose.
+    // Multiples per axis: 1 where the input already has the output's size, else the
+    // output size.
     let target_shape = if raw_input_shape.len() == raw_output_shape.len() {
         actual_tensor_shape(graph, store, node)
     } else {
@@ -538,8 +537,9 @@ pub(super) fn emit_expand(ctx: &EmitContext) -> EmitResult {
     }
     let tile_rank = target_shape.len();
 
-    // Pad input shape to tile_rank in logical order (matching emit_tile_with_multiples).
-    let logical_input: Vec<i32> = if input_shape.len() < tile_rank {
+    // Pad the input shape with leading 1s to tile_rank, as emit_tile_with_multiples
+    // reshapes it.
+    let padded_input: Vec<i32> = if input_shape.len() < tile_rank {
         let mut padded = vec![1; tile_rank - input_shape.len()];
         padded.extend(input_shape.iter().copied());
         padded
@@ -547,7 +547,7 @@ pub(super) fn emit_expand(ctx: &EmitContext) -> EmitResult {
         input_shape
     };
 
-    let multiples: Vec<i32> = logical_input
+    let multiples: Vec<i32> = padded_input
         .iter()
         .zip(target_shape.iter())
         .map(|(&input_dim, &output_dim)| {
@@ -666,7 +666,7 @@ pub(super) fn emit_concat(ctx: &EmitContext) -> EmitResult {
             n.meta.val.shape[..n.meta.val.shape_len as usize].to_vec()
         }
         eprintln!(
-            "[CatDebug] {} raw_axis={} axis={} logical={:?} emitted={:?}",
+            "[CatDebug] {} raw_axis={} axis={} val={:?} emitted={:?}",
             node.name,
             raw_axis,
             axis,
@@ -681,7 +681,7 @@ pub(super) fn emit_concat(ctx: &EmitContext) -> EmitResult {
         for id in ids {
             if let Some(n) = graph.node(id) {
                 eprintln!(
-                    "[CatDebug]   in {} target={:?} logical={:?} emitted={:?}",
+                    "[CatDebug]   in {} target={:?} val={:?} emitted={:?}",
                     n.name,
                     n.target,
                     dbg_shape(n),

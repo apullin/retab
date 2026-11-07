@@ -37,7 +37,7 @@ fn rescale_output_dtype(node: &Node) -> DType {
 }
 
 fn plan_rescale_output(graph: &Graph, node: &Node, store: &TensorStore) -> RescaleOutputPlan {
-    let logical_output_shape = raw_i32_shape(node);
+    let val_shape = raw_i32_shape(node);
     let output_dtype = rescale_output_dtype(node);
     let input_tosa_dtype = first_input_node(graph, node)
         .map(|input_node| match input_node.op {
@@ -69,11 +69,11 @@ fn plan_rescale_output(graph: &Graph, node: &Node, store: &TensorStore) -> Resca
         };
     };
 
-    if logical_output_shape.len() != 2 {
+    if val_shape.len() != 2 {
         return RescaleOutputPlan {
             input_tosa_dtype,
             output_name: node.name.clone(),
-            output_shape: logical_output_shape,
+            output_shape: val_shape,
             post_reshape: None,
         };
     }
@@ -85,7 +85,7 @@ fn plan_rescale_output(graph: &Graph, node: &Node, store: &TensorStore) -> Resca
         output_shape: batched_shape,
         post_reshape: Some(PostRescaleReshape {
             input_name: output_name,
-            output_shape: logical_output_shape,
+            output_shape: val_shape,
             output_dtype,
         }),
     }

@@ -43,6 +43,7 @@ pub(crate) fn is_accumulator_output(target: &OpTarget) -> bool {
             | OpTarget::Bmm
             | OpTarget::TosaConv2d
             | OpTarget::TosaDepthwiseConv2d
+            | OpTarget::TosaConv3d
             | OpTarget::TosaTransposeConv2d
             | OpTarget::TosaMatmul
     )

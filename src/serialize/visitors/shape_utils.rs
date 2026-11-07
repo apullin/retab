@@ -28,6 +28,11 @@ pub(super) fn raw_i32_shape(node: &Node) -> Vec<i32> {
         .collect()
 }
 
+/// The rank of `node`'s val.
+pub(super) fn val_rank(node: &Node) -> usize {
+    node.meta.val.shape_len as usize
+}
+
 fn resolve_inferred_shape(shape: &[i32], input_shape: &[i32]) -> Option<Vec<i32>> {
     let negative_positions: Vec<usize> = shape
         .iter()
@@ -94,12 +99,7 @@ fn passthrough_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> 
         return None;
     }
     let input_node = first_input_node(graph, node)?;
-    let input_shape = actual_tensor_shape(graph, store, input_node);
-    if matches!(node.target, OpTarget::TosaRescale) && input_node.target == OpTarget::TosaTable {
-        return Some(input_shape);
-    }
-
-    Some(input_shape)
+    Some(actual_tensor_shape(graph, store, input_node))
 }
 
 fn shape_preserving_unary_tensor_shape(

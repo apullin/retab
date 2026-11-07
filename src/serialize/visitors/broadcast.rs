@@ -83,21 +83,17 @@ pub(super) fn maybe_materialize_binary_broadcast(
         actual_tensor_shape(graph, store, input_nodes[1]),
     ];
 
-    let (smaller_idx, target_shape) = if input_shapes[0].len() < input_shapes[1].len() {
-        let target_shape = broadcast_shape_for_binary_inputs(
-            &raw_i32_shape(input_nodes[0]),
-            &raw_i32_shape(input_nodes[1]),
-        );
-        (0usize, target_shape)
+    let (smaller_idx, larger_idx) = if input_shapes[0].len() < input_shapes[1].len() {
+        (0usize, 1usize)
     } else if input_shapes[1].len() < input_shapes[0].len() {
-        let target_shape = broadcast_shape_for_binary_inputs(
-            &raw_i32_shape(input_nodes[1]),
-            &raw_i32_shape(input_nodes[0]),
-        );
-        (1usize, target_shape)
+        (1usize, 0usize)
     } else {
         return;
     };
+    let target_shape = broadcast_shape_for_binary_inputs(
+        &raw_i32_shape(input_nodes[smaller_idx]),
+        val_rank(input_nodes[larger_idx]),
+    );
 
     let broadcast_name = format!("{}_input{}_broadcast", node.name, smaller_idx);
     let broadcast_dtype = actual_tensor_dtype(graph, input_nodes[smaller_idx]);
@@ -129,7 +125,7 @@ pub(super) fn maybe_materialize_clamp_bound_broadcast(
     }
 
     let target_shape =
-        broadcast_shape_for_binary_inputs(&raw_i32_shape(bound_node), &raw_i32_shape(clamp_node));
+        broadcast_shape_for_binary_inputs(&raw_i32_shape(bound_node), val_rank(clamp_node));
 
     let broadcast_name = format!("{}_{}_broadcast", clamp_node.name, suffix);
     let shape_name = format!("{}_shape", broadcast_name);
@@ -167,15 +163,12 @@ pub(super) fn resolve_clamp_bound_input(
     }
 }
 
-/// The reshape target that brings a lower-rank binary or clamp operand up to the other
-/// operand's rank: its shape with leading 1s, as for numpy broadcasting.
-pub(super) fn broadcast_shape_for_binary_inputs(
-    smaller_raw: &[i32],
-    larger_raw: &[i32],
-) -> Vec<i32> {
-    let mut padded_raw = vec![1; larger_raw.len().saturating_sub(smaller_raw.len())];
-    padded_raw.extend_from_slice(smaller_raw);
-    padded_raw
+/// The reshape target that brings a lower-rank binary or clamp operand up to `rank`, the
+/// other operand's: its shape with leading 1s, as for numpy broadcasting.
+pub(super) fn broadcast_shape_for_binary_inputs(smaller: &[i32], rank: usize) -> Vec<i32> {
+    let mut padded = vec![1; rank.saturating_sub(smaller.len())];
+    padded.extend_from_slice(smaller);
+    padded
 }
 
 #[cfg(test)]
@@ -184,16 +177,13 @@ mod tests {
 
     #[test]
     fn lower_rank_operands_gain_leading_unit_axes() {
+        assert_eq!(broadcast_shape_for_binary_inputs(&[4], 4), vec![1, 1, 1, 4]);
         assert_eq!(
-            broadcast_shape_for_binary_inputs(&[4], &[1, 2, 4, 4]),
-            vec![1, 1, 1, 4]
-        );
-        assert_eq!(
-            broadcast_shape_for_binary_inputs(&[4, 1], &[1, 1, 4, 4]),
+            broadcast_shape_for_binary_inputs(&[4, 1], 4),
             vec![1, 1, 4, 1]
         );
         assert_eq!(
-            broadcast_shape_for_binary_inputs(&[1, 25, 20], &[1, 10, 25, 20]),
+            broadcast_shape_for_binary_inputs(&[1, 25, 20], 4),
             vec![1, 1, 25, 20]
         );
     }

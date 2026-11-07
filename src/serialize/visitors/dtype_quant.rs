@@ -221,12 +221,7 @@ fn actual_tensor_dtype_impl(graph: &Graph, node: &Node) -> DType {
             }
         }
         OpTarget::To => node_output_dtype(node),
-        // IrRewriteConv makes the TOSA CONV3Ds (P2 design X1).
-        ref target
-            if op_semantics::is_accumulator_output(target) || *target == OpTarget::TosaConv3d =>
-        {
-            accumulator_output_dtype(node)
-        }
+        ref target if op_semantics::is_accumulator_output(target) => accumulator_output_dtype(node),
         OpTarget::Sum => {
             let semantic_dtype = node_output_dtype(node);
             if is_float_dtype(semantic_dtype) {
