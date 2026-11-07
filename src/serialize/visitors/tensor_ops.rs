@@ -22,8 +22,6 @@ pub fn register(table: &mut EmitterTable) {
         (OpTarget::Flatten, emit_reshape),
         (OpTarget::View, emit_reshape),
         (OpTarget::Permute, emit_aten_permute),
-        (OpTarget::UpsampleNearest2d, emit_resize),
-        (OpTarget::UpsampleBilinear2d, emit_resize),
         (OpTarget::Cat, emit_concat),
         (OpTarget::Flip, emit_flip),
         (OpTarget::Zeros, emit_full),
@@ -40,64 +38,7 @@ fn emit_const_shape(ctx: &EmitContext) -> EmitResult {
     result
 }
 
-struct ParsedResizeSpec {
-    input_name: String,
-    resize_output_name: String,
-    final_output_name: String,
-    input_shape: Vec<i32>,
-    output_shape: Vec<i32>,
-    align_corners: bool,
-    resize_mode: ResizeMode,
-    resize_output_dtype: DType,
-    final_output_dtype: Option<DType>,
-    bilinear_rescale_scale: Option<f64>,
-}
-
-fn gcd_i32(mut lhs: i32, mut rhs: i32) -> i32 {
-    lhs = lhs.abs();
-    rhs = rhs.abs();
-    while rhs != 0 {
-        let rem = lhs % rhs;
-        lhs = rhs;
-        rhs = rem;
-    }
-    lhs.max(1)
-}
-
-fn resize_axis_parameters(
-    input_size: i32,
-    output_size: i32,
-    align_corners: bool,
-) -> (i32, i32, i32, i32) {
-    let scale_n = if align_corners && input_size > 1 && output_size > 1 {
-        output_size - 1
-    } else {
-        output_size
-    };
-    let scale_d = if align_corners && input_size > 1 && output_size > 1 {
-        input_size - 1
-    } else {
-        input_size
-    };
-    let gcd = gcd_i32(scale_n, scale_d);
-    let scale_n = 2 * scale_n / gcd;
-    let scale_d = 2 * scale_d / gcd;
-    let offset = if align_corners {
-        0
-    } else {
-        scale_d / 2 - scale_n / 2
-    };
-    let border = scale_d * (output_size - 1) - scale_n * (input_size - 1) + offset;
-    (scale_n, scale_d, offset, border)
-}
-
 fn parse_resize_mode(node: &Node) -> ResizeMode {
-    if matches!(node.target, OpTarget::UpsampleBilinear2d) {
-        return ResizeMode::Bilinear;
-    }
-    if matches!(node.target, OpTarget::UpsampleNearest2d) {
-        return ResizeMode::Nearest;
-    }
     match kwarg_string(node, "resize_mode").as_deref() {
         Some("bilinear") => ResizeMode::Bilinear,
         _ => ResizeMode::Nearest,
@@ -315,115 +256,6 @@ pub(super) fn emit_dequantize_per_tensor(ctx: &EmitContext) -> EmitResult {
     result
 }
 
-fn emit_direct_rescale_params(
-    result: &mut EmitResult,
-    base_name: &str,
-    input_dtype: DType,
-    output_dtype: DType,
-    scale: f64,
-) -> (String, String, String, String, bool) {
-    let scale32 = input_dtype != DType::Int48;
-    let scale_width = if scale32 { 32 } else { 16 };
-    let (multiplier, shift) = compute_multiplier_and_shift_with_width(scale, scale_width);
-    let multiplier_name = format!("{base_name}_multipliers");
-    let shift_name = format!("{base_name}_shifts");
-    let input_zp_name = format!("{base_name}_input_zp");
-    let output_zp_name = format!("{base_name}_output_zp");
-
-    if scale32 {
-        push_rank1_const(
-            result,
-            multiplier_name.clone(),
-            DType::Int32,
-            multiplier.to_le_bytes().to_vec(),
-            1,
-        );
-    } else {
-        push_rank1_const(
-            result,
-            multiplier_name.clone(),
-            DType::Int16,
-            (multiplier as i16).to_le_bytes().to_vec(),
-            1,
-        );
-    }
-    push_rank1_const(
-        result,
-        shift_name.clone(),
-        DType::Int8,
-        vec![shift as u8],
-        1,
-    );
-    push_zero_point_const(result, input_zp_name.clone(), input_dtype, 0);
-    push_zero_point_const(result, output_zp_name.clone(), output_dtype, 0);
-
-    (
-        multiplier_name,
-        shift_name,
-        input_zp_name,
-        output_zp_name,
-        scale32,
-    )
-}
-
-impl ParsedResizeSpec {
-    fn parse(graph: &Graph, node: &Node, store: &TensorStore) -> Option<Self> {
-        let input_name = input_name(graph, node, 0)?;
-        let input_node = first_input_node(graph, node)?;
-        let input_shape = actual_tensor_shape(graph, store, input_node);
-        let output_shape = actual_tensor_shape(graph, store, node);
-        if input_shape.len() != 4 || output_shape.len() != 4 {
-            return None;
-        }
-
-        let resize_mode = parse_resize_mode(node);
-        let align_corners = matches!(resize_mode, ResizeMode::Bilinear)
-            && arg_bool(node, 2, kwarg_bool(node, "align_corners", false));
-        let input_dtype = actual_tensor_dtype(graph, input_node);
-        let final_output_name = primary_output_name(graph, node);
-        let final_output_dtype = node_output_dtype(node);
-        let needs_bilinear_rescale = matches!(node.target, OpTarget::UpsampleBilinear2d)
-            && matches!(input_dtype, DType::Int8 | DType::Int16);
-
-        if needs_bilinear_rescale {
-            let (scale_n_y, _, _, _) =
-                resize_axis_parameters(input_shape[1], output_shape[1], align_corners);
-            let (scale_n_x, _, _, _) =
-                resize_axis_parameters(input_shape[2], output_shape[2], align_corners);
-
-            return Some(Self {
-                input_name,
-                resize_output_name: format!("{final_output_name}_resize"),
-                final_output_name,
-                input_shape,
-                output_shape,
-                align_corners,
-                resize_mode,
-                resize_output_dtype: if input_dtype == DType::Int16 {
-                    DType::Int48
-                } else {
-                    DType::Int32
-                },
-                final_output_dtype: Some(final_output_dtype),
-                bilinear_rescale_scale: Some(1.0 / f64::from(scale_n_y * scale_n_x)),
-            });
-        }
-
-        Some(Self {
-            input_name,
-            resize_output_name: final_output_name.clone(),
-            final_output_name,
-            input_shape,
-            output_shape,
-            align_corners,
-            resize_mode,
-            resize_output_dtype: final_output_dtype,
-            final_output_dtype: None,
-            bilinear_rescale_scale: None,
-        })
-    }
-}
-
 struct ParsedShapeTransformSpec {
     input_names: Vec<String>,
     output_shape: Vec<i32>,
@@ -572,88 +404,6 @@ fn emit_tosa_resize(ctx: &EmitContext) -> EmitResult {
             mode: parse_resize_mode(node),
         }),
         inputs,
-    );
-    result
-}
-
-pub(super) fn emit_resize(ctx: &EmitContext) -> EmitResult {
-    let Some(spec) = ParsedResizeSpec::parse(ctx.graph, ctx.node, ctx.store) else {
-        return EmitResult::default();
-    };
-
-    let (scale_n_y, scale_d_y, offset_y, border_y) = resize_axis_parameters(
-        spec.input_shape[1],
-        spec.output_shape[1],
-        spec.align_corners,
-    );
-    let (scale_n_x, scale_d_x, offset_x, border_x) = resize_axis_parameters(
-        spec.input_shape[2],
-        spec.output_shape[2],
-        spec.align_corners,
-    );
-
-    // RESIZE's scale, offset and border are shape operands: TOSA 1.0 produces them with
-    // CONST_SHAPE, and Vela rejects a CONST of shape type.
-    let mut result = EmitResult::default();
-    let scales_name = format!("{}_scales", spec.final_output_name);
-    push_const_shape(
-        &mut result,
-        scales_name.clone(),
-        vec![scale_n_y, scale_d_y, scale_n_x, scale_d_x],
-    );
-    let offset_name = format!("{}_offset", spec.final_output_name);
-    push_const_shape(&mut result, offset_name.clone(), vec![offset_y, offset_x]);
-    let border_name = format!("{}_border", spec.final_output_name);
-    push_const_shape(&mut result, border_name.clone(), vec![border_y, border_x]);
-
-    result.push_output_op(
-        make_empty_tensor(
-            spec.resize_output_name.clone(),
-            spec.output_shape.clone(),
-            spec.resize_output_dtype,
-        ),
-        Op::Resize,
-        Attribute::Resize(ResizeAttribute {
-            mode: spec.resize_mode,
-        }),
-        vec![spec.input_name, scales_name, offset_name, border_name],
-    );
-
-    let Some(final_output_dtype) = spec.final_output_dtype else {
-        return result;
-    };
-    let Some(scale) = spec.bilinear_rescale_scale else {
-        return result;
-    };
-    let (multiplier_name, shift_name, input_zp_name, output_zp_name, scale32) =
-        emit_direct_rescale_params(
-            &mut result,
-            &spec.final_output_name,
-            spec.resize_output_dtype,
-            final_output_dtype,
-            scale,
-        );
-    result.push_output_op(
-        make_empty_tensor(
-            spec.final_output_name,
-            spec.output_shape,
-            final_output_dtype,
-        ),
-        Op::Rescale,
-        Attribute::Rescale(RescaleAttribute {
-            scale32,
-            rounding_mode: RoundingMode::SingleRound,
-            per_channel: false,
-            input_unsigned: false,
-            output_unsigned: false,
-        }),
-        vec![
-            spec.resize_output_name,
-            multiplier_name,
-            shift_name,
-            input_zp_name,
-            output_zp_name,
-        ],
     );
     result
 }

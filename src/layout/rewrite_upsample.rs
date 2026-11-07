@@ -15,7 +15,7 @@
 //! - **Parameters.** [`resize_parameters_1d`] is `get_resize_parameters_1d`
 //!   (`:45-155`) for static sizes, run per axis on the input's and the
 //!   upsample's vals. It keeps rc4's nearest-mode branches, which RETAB's
-//!   dim-order emitter lacks (`resize_axis_parameters`, design §3.3), and its
+//!   earlier dim-order emitter lacked (`resize_axis_parameters`, design §3.3), and its
 //!   `nsimplify(scale_factor, tolerance=1e-6, rational=True)` for a nearest
 //!   upsample with explicit scale factors (design risk 6): see
 //!   [`nsimplify_scale_factor`].
@@ -804,7 +804,7 @@ mod tests {
     }
 
     /// rc4's nearest 5 -> 8 (design §3.3, critique C): scale [16, 10], offset
-    /// -8, border -2 per axis, where RETAB's dim-order emitter computes -3 and 3.
+    /// -8, border -2 per axis, where RETAB's earlier dim-order emitter computed -3 and 3.
     #[test]
     fn nearest_int8_upsample_becomes_const_shapes_permutes_and_resize() {
         let q = qparam(0.017, 4, I8);

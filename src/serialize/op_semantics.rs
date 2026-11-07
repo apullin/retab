@@ -143,9 +143,8 @@ pub(crate) fn has_explicit_tosa_shape_val(target: &OpTarget) -> bool {
     )
 }
 
-/// Aten conv, pool and upsample ops. Their visitors date from the dim-order model, so
-/// they must have been rewritten to TOSA ops before serialization (P2 design X5,
-/// critique B11).
+/// Aten conv, pool and upsample ops. They have no visitor: rc4's rewrites turn them into
+/// TOSA ops before serialization (P2 design X5, critique B11).
 pub(crate) fn is_aten_spatial_layout_op(target: &OpTarget) -> bool {
     matches!(
         target,

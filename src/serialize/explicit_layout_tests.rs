@@ -941,12 +941,12 @@ fn int16_bilinear_resize_is_int48_into_its_rescale() {
 }
 
 // ---------------------------------------------------------------------------
-// Gates on dim-order-era visitors
+// The aten spatial-op guard
 // ---------------------------------------------------------------------------
 
 #[test]
 fn aten_spatial_ops_send_explicit_graphs_to_stock() {
-    // X5 and critique B11: their visitors date from the dim-order model.
+    // X5 and critique B11: aten convs, pools and upsamples have no visitor.
     for target in [
         "aten.convolution.default",
         "aten.conv1d.default",
