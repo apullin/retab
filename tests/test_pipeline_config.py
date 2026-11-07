@@ -106,8 +106,7 @@ def test_native_entry_points_refuse_unported_policies(entry_point, field, value)
         getattr(_native, entry_point)(None, pipeline_config=config)
 
 
-@pytest.mark.parametrize("recursive", [False, True])
-def test_main_and_nested_regions_receive_the_same_pipeline_config(monkeypatch, recursive):
+def test_main_and_nested_regions_receive_the_same_pipeline_config(monkeypatch):
     from executorch.exir import graph_module
 
     compile_spec = EthosUCompileSpec("ethos-u55-128")
@@ -123,7 +122,6 @@ def test_main_and_nested_regions_receive_the_same_pipeline_config(monkeypatch, r
         nested_branch: [],
     }
     monkeypatch.setattr(graph_module, "get_cond_while_submodules", lambda gm: regions[gm])
-    monkeypatch.setenv("RETAB_FORCE_CF_RECURSIVE_PASSES", "1" if recursive else "0")
     monkeypatch.setattr(rp, "stock_fallback_reason", lambda ep, spec: None)
     calls = []
 
@@ -149,7 +147,8 @@ def test_main_and_nested_regions_receive_the_same_pipeline_config(monkeypatch, r
         ("run_fx_submodule_passes", "true_graph__body_graph"),
         ("run_fx_cond_passes", "true_graph__body_graph__true_graph"),
     ]
-    assert sum(call[0] == "run_fx_passes" for call in calls) == (4 if recursive else 1)
+    # Only the main graph runs the parent pipeline; each region runs its own.
+    assert sum(call[0] == "run_fx_passes" for call in calls) == 1
 
 
 def test_u55_split_gets_rc4s_exact_check(monkeypatch):

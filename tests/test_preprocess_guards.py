@@ -68,6 +68,59 @@ def test_overlapping_parallel_calls_each_lower_their_own_programs(monkeypatch):
     assert results["b"] == {"forward": ["b0", "b1"]}
 
 
+class _ExternalBlocksBackend:
+    """Stands in for EthosUBackend with external Vela blocks: each result carries a
+    data_store_output, as rc4's EthosUBackend.preprocess builds it, and the bytes name
+    the process that made it."""
+
+    @staticmethod
+    def preprocess(edge_program, compile_specs):
+        import os
+
+        from executorch.exir._serialize._named_data_store import NamedDataStore
+        from executorch.exir.backend.backend_details import PreprocessResult
+
+        store = NamedDataStore()
+        store.add_named_data(f"cmd_{edge_program}", edge_program.encode() * 3, alignment=16, external_tag="mem1")
+        return PreprocessResult(
+            processed_bytes=str(os.getpid()).encode(),
+            data_store_output=store.get_named_data_store_output(),
+        )
+
+
+def test_parallel_workers_return_data_store_output_intact(monkeypatch):
+    """Results come back from real fork workers by pickling; #21893's data_store_output
+    must survive that trip unchanged."""
+    import multiprocessing
+    import os
+
+    import retab.preprocess as rp
+
+    try:
+        multiprocessing.get_context("fork")
+    except ValueError:
+        pytest.skip("the fork start method is unavailable")
+    monkeypatch.setenv("RETAB_PARALLEL_BACKEND_PREPROCESS_WORKERS", "2")
+    # A TOSA dump path forces the serial path, which this test must not take.
+    monkeypatch.delenv("RETAB_DUMP_TOSA", raising=False)
+    spec = types.SimpleNamespace(_get_intermediate_path=lambda: None)
+    multimethod = rp._make_parallel_backend_preprocess_multimethod(lambda specs: spec).__get__(
+        None, _ExternalBlocksBackend
+    )
+    programs, specs = {"forward": ["a0", "a1", "a2"]}, {"forward": [[], [], []]}
+
+    results = multimethod(programs, specs)["forward"]
+
+    assert all(int(result.processed_bytes) != os.getpid() for result in results)
+    serial = rp._serial_backend_preprocess_multimethod(_ExternalBlocksBackend, programs, specs)
+    assert [r.data_store_output for r in results] == [r.data_store_output for r in serial["forward"]]
+    assert [list(r.data_store_output.external_data["mem1"]) for r in results] == [
+        ["cmd_a0"],
+        ["cmd_a1"],
+        ["cmd_a2"],
+    ]
+
+
 def _symbolic_dim():
     from torch.fx.experimental.symbolic_shapes import ShapeEnv
 

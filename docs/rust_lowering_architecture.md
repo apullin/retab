@@ -43,11 +43,13 @@ restores the captured originals.
 
 [../python/retab/preprocess.py](../python/retab/preprocess.py) captures stock
 `TOSABackend` attributes before replacing `_preprocess`. Both stock TOSA and
-Ethos-U backends call that entry point. Optional fork override setters are
-supported when present, but `compat/executorch.toml` uses `mode = "stock"`.
-Activation also installs guarded decomposition fast paths from
-[../python/retab/_decomp_hooks.py](../python/retab/_decomp_hooks.py) against
-available upstream helpers.
+Ethos-U backends call that entry point, and no ExecuTorch fork or override
+hook is involved (`compat/executorch.toml` records `mode = "stock"`).
+The decomposition fast paths in
+[../python/retab/_decomp_hooks.py](../python/retab/_decomp_hooks.py) stay off:
+`install(fast_paths=True)` raises until they are re-derived on rc4, since the
+edge-manager fast path skips rc4's pre-decomposition transforms (Linear
+APU-117).
 
 `stock_fallback_reason()` sends float profiles, TOSA major/minor versions
 other than 1.0, development mode, custom pass pipelines, registered pass
@@ -55,12 +57,12 @@ insertions, delegate-owned mutable buffers, and symbolic shapes to the
 captured stock implementation. `preprocess_stats()` returns process-local
 RETAB counts and stock fallback counts by reason.
 
-For an in-scope graph, Python copies the original state dictionary, calls
-the Rust parent and submodule pass entry points, aligns graph-signature
-input specs with placeholder order, and invokes `ingest_and_serialize()`.
-It also handles requested artifact dumps and delegate metadata through
-`_cf_ctx.py`. Serialization consumes the stashed IR; its compatibility
-arguments do not cause a second Python graph import.
+For an in-scope graph, Python calls the Rust parent and submodule pass entry
+points, which read the FX graph and state dictionary without modifying them,
+then `ingest_and_serialize()`, which consumes the stashed IR without a second
+Python graph import. Python also writes requested artifact dumps and, under
+Ethos-U, raises stock's error for a delegate input that no TOSA operator
+reads. Like stock's `_preprocess`, it returns only the TOSA bytes.
 
 Experimental parallel backend preprocessing patches `preprocess_multimethod`
 only when workers are explicitly enabled. It uses fork workers for multiple
@@ -234,8 +236,8 @@ Maturin derives the Python package version from `Cargo.toml`.
 Benchmarks, the stock-versus-RETAB differential harness, and the model corpus
 are kept separately in a private repository.
 
-[ENVIRONMENT.md](ENVIRONMENT.md) records environment variables and legacy
-aliases. Earlier proposals are preserved in
+[ENVIRONMENT.md](ENVIRONMENT.md) records environment variables. Earlier
+proposals are preserved in
 [history/RUST_GRAPH_IR.md](history/RUST_GRAPH_IR.md) and
 [history/refactor_backlog.md](history/refactor_backlog.md); they are historical
 rather than a description of the current module layout.

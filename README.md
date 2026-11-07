@@ -39,9 +39,9 @@ torch.export -> quantize -> Arm partitioner -> TOSABackend._preprocess
 
 [python/retab/preprocess.py](python/retab/preprocess.py) replaces
 `TOSABackend._preprocess` at runtime and preserves the stock implementation
-for fallback and restoration. Optional fork override hooks are used when
-present. Activation also installs guarded decomposition fast paths from
-`_decomp_hooks.py` against available ExecuTorch and torch helpers.
+for fallback and restoration. The rest of `to_edge_transform_and_lower` stays
+stock: RETAB's decomposition fast paths are disabled on rc4 (see the
+[Python API](#python-api)).
 
 RETAB handles TOSA 1.0 INT graphs with the target's default pass pipeline.
 It hands these cases to stock preprocessing:
@@ -83,9 +83,9 @@ uv pip install --python "$VENV/bin/python" \
   "tosa-tools==2026.5.0" "flatbuffers==25.2.10" maturin pytest
 ```
 
-An ExecuTorch source overlay is unnecessary for this wheel-based setup.
-The existing source-checkout installer is a separate workflow; see
-[docs/COMPANION_REPOS.md](docs/COMPANION_REPOS.md).
+This explicit install is the supported setup; RETAB ships no installer
+script. See [docs/COMPANION_REPOS.md](docs/COMPANION_REPOS.md) for the tested
+versions.
 
 ### Build and test
 
@@ -115,10 +115,10 @@ To produce a wheel:
 
 Maturin takes the package version from `Cargo.toml`.
 
-`tests/` contains Python integration, placeholder binding, control-flow
-metadata, and CNN lowering smoke tests. Tests requiring the native extension,
-ExecuTorch's Arm backend, or the TOSA reference model skip when those
-components are unavailable.
+`tests/` contains Python integration, seam, placeholder binding,
+control-flow, and CNN lowering smoke tests. Tests requiring the native
+extension, ExecuTorch's Arm backend, or the TOSA reference model skip when
+those components are unavailable.
 
 ### Smoke lower
 
@@ -144,10 +144,13 @@ print(preprocess_stats())
 manager. Nested activation restores the stock backend when the outermost
 activation exits.
 
-By default only `TOSABackend._preprocess` is replaced. `activated(fast_paths=True)`
-also installs RETAB's edge-manager and `run_decompositions` fast paths, which
-speed up the rest of `to_edge_transform_and_lower` but have no test coverage on
-rc4 yet.
+By default, activation replaces only `TOSABackend._preprocess` and marks
+Ethos-U compiles for RETAB's unused-input check. RETAB's edge-manager and
+`run_decompositions` fast paths, which sped up the rest of
+`to_edge_transform_and_lower` on earlier ExecuTorch versions, are disabled
+until they are re-derived on v1.6.0-rc4: the edge-manager fast path skips
+rc4's pre-decomposition transforms. Until then `activated(fast_paths=True)`
+and `install(fast_paths=True)` raise `NotImplementedError`.
 
 For fragmented graphs, an experimental multi-process backend preprocessing
 mode is available through `activated(parallel_backend_preprocess_workers=8)`
@@ -155,8 +158,7 @@ or `RETAB_PARALLEL_BACKEND_PREPROCESS_WORKERS`. It is opt-in and returns to
 serial execution for debug artifact dumps or when fork multiprocessing is
 unavailable. Counters remain process-local.
 
-[docs/ENVIRONMENT.md](docs/ENVIRONMENT.md) documents all environment reads,
-including legacy aliases and settings that are dormant on stock rc4.
+[docs/ENVIRONMENT.md](docs/ENVIRONMENT.md) documents all environment reads.
 
 ## Validation
 
@@ -181,9 +183,8 @@ retab/
 ├── python/retab/
 │   ├── integration/             # Stable ExecuTorch install/activation API
 │   ├── preprocess.py            # Backend scope, orchestration, and counters
-│   ├── _cf_ctx.py               # Delegate metadata reads
-│   └── _decomp_hooks.py          # Guarded decomposition fast paths
-├── compat/executorch.toml       # Tested stock stack and optional hooks
+│   └── _decomp_hooks.py         # Decomposition fast paths (disabled on rc4)
+├── compat/executorch.toml       # Tested stock stack and the seams RETAB uses
 └── tests/                       # Python integration tests and rc4 inventories
 ```
 
@@ -193,9 +194,10 @@ uses a typed `OpTarget`, `EmitContext`, and an emitter dispatch table.
 
 See [docs/rust_lowering_architecture.md](docs/rust_lowering_architecture.md)
 for the current implementation map. Earlier design notes are under
-[docs/history/](docs/history/). The old direct-lowering lane remains recorded
-in [docs/FASTLANE_WORKFLOW.md](docs/FASTLANE_WORKFLOW.md).
+[docs/history/](docs/history/). The fork-only direct-lowering lane is no
+longer part of RETAB; it is parked as a speedup candidate and stays in git
+history.
 
 ## License
 
-Apache-2.0
+Apache-2.0; see [LICENSE](LICENSE).

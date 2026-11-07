@@ -7,6 +7,8 @@ name = "retab"
 dynamic = ["version"]
 description = "Rust acceleration for ExecuTorch Arm TOSA 1.0 INT preprocessing and serialization"
 requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 
 [project.urls]
 Repository = "https://github.com/apullin/retab"

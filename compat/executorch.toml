@@ -1,14 +1,35 @@
 [executorch]
 mode = "stock"
-reason = "RETAB patches TOSABackend._preprocess at runtime and falls back to stock preprocess outside its scope, so released ExecuTorch wheels work. Fork seams are used when present but are not required."
+reason = "RETAB patches TOSABackend._preprocess at runtime and falls back to stock preprocess outside its scope, so released ExecuTorch wheels work without a fork."
 tested = ["executorch 1.6.0 (v1.6.0-rc4, 4776f71b6)"]
 
+# The ExecuTorch internals RETAB replaces or wraps, or whose behaviour it relies on, as
+# dotted paths (compile-spec accessors it merely calls are not listed).
+# tests/test_compat_seams.py checks that each one resolves; review any that changed
+# when the tested ExecuTorch moves.
 [executorch.required_seams]
+# Replaced while RETAB is installed; stock's is the fallback. TOSABackend.preprocess,
+# EthosUBackend and VgfBackend all call it.
 preprocess = "executorch.backends.arm.tosa.backend.TOSABackend._preprocess"
+# Captured with _preprocess and restored on uninstall.
+tosa_preprocess = "executorch.backends.arm.tosa.backend.TOSABackend.preprocess"
+# Wrapped to mark Ethos-U compiles. Under the mark RETAB raises this function's
+# unused-input error, whose message it copies verbatim.
+ethos_u_preprocess = "executorch.backends.arm.ethosu.backend.EthosUBackend.preprocess"
+# RETAB's U55 permute split asks rc4's one-TRANSPOSE Vela probe, inside a lowering
+# context for the compile spec's TOSA version.
+u55_transpose_check = "executorch.backends.arm._passes.decompose_permute_for_u55_pass.DecomposePermuteForU55Pass._violates_exact_constraint"
+tosa_lowering_context = "executorch.backends.arm.tosa.specification.TosaLoweringContext"
+# The cond/while regions RETAB lowers and scans for symbolic shapes.
+cond_while_submodules = "executorch.exir.graph_module.get_cond_while_submodules"
+# Registered pass insertions send a graph to stock. RETAB reads this registry and
+# treats an ImportError as "none", so a rename would silently drop the fallback.
+registered_pass_insertions = "executorch.backends.arm._passes.arm_pass_manager._registered_pass_insertions"
 
-[executorch.optional_seams]
-preprocess_override = "executorch.backends.arm.tosa.backend.TOSABackend.set_preprocess_override"
-edge_manager_override = "executorch.exir.program.set_edge_manager_for_partitioners_override"
+[executorch.opt_in_seams]
+# Shadowed on EthosUBackend and VgfBackend only when
+# RETAB_PARALLEL_BACKEND_PREPROCESS_WORKERS is above 1; RETAB's serial path copies it.
+preprocess_multimethod = "executorch.exir.backend.backend_details.BackendDetails.preprocess_multimethod"
 
 [python]
 requires = ">=3.10"

@@ -36,21 +36,3 @@ resolve_venv_dir() {
     exit 1
   fi
 }
-
-resolve_executorch_src() {
-  local explicit="${2:-}"
-  if [[ -n "${explicit}" ]]; then
-    printf '%s\n' "${explicit}"
-    return 0
-  fi
-
-  if [[ -n "${EXECUTORCH_SRC:-}" ]]; then
-    printf '%s\n' "${EXECUTORCH_SRC}"
-    return 0
-  fi
-
-  echo "error: no ExecuTorch checkout was provided." >&2
-  echo "hint: pass --source /path/to/executorch or set EXECUTORCH_SRC" >&2
-  echo "hint: current compatibility notes are in compat/executorch.toml" >&2
-  exit 1
-}

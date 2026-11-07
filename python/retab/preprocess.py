@@ -10,7 +10,7 @@ dedicated path is:
 
 The call chain is:
   EthosUBackend.preprocess(ep, compile_specs)
-    -> TOSABackend._preprocess(ep, tosa_compile_spec)  <-- override or patch
+    -> TOSABackend._preprocess(ep, tosa_compile_spec)  <-- RETAB replaces this
     -> EthosUBackend._compile_tosa_flatbuffer(tosa_bytes, ...)  (Vela)
 
 By overriding the TOSA preprocess stage, we only swap the TOSA generation
@@ -31,10 +31,7 @@ from executorch.exir.backend.backend_details import PreprocessResult
 from executorch.exir.backend.compile_spec_schema import CompileSpec
 from torch.export.exported_program import ExportedProgram
 
-from retab._cf_ctx import _collect_delegate_info_meta
 from retab._decomp_hooks import (
-    _install_edge_decomp_fast_path,
-    _install_run_decomp_fast_path,
     _uninstall_edge_decomp_fast_path,
     _uninstall_run_decomp_fast_path,
 )
@@ -46,34 +43,10 @@ _parallel_backend_multimethod_originals: dict[type, tuple[bool, object | None]] 
 _parallel_backend_preprocess_jobs = None
 
 
-def _env_get(name: str, *aliases: str, default: str | None = None) -> str | None:
-    for candidate in (name, *aliases):
-        value = os.environ.get(candidate)
-        if value is not None:
-            return value
-    return default
-
-
 def _run_control_flow_submodule_rust_passes(
     gm, edge_program, retab, pipeline_config, region_prefix: str | None = None
 ) -> None:
     from executorch.exir.graph_module import get_cond_while_submodules
-
-    if (
-        _env_get(
-            "RETAB_FORCE_CF_RECURSIVE_PASSES",
-            "ARM_TOSA_ENGINE_FORCE_CF_RECURSIVE_PASSES",
-        )
-        == "1"
-    ):
-        for name, submodule, _ in get_cond_while_submodules(gm):
-            retab.run_fx_passes(
-                submodule, edge_program, pipeline_config=pipeline_config
-            )
-            logger.info(
-                "[retab] ran recursive fx pass pipeline on control-flow submodule %s",
-                name,
-            )
 
     for name, submodule, cf_node in get_cond_while_submodules(gm):
         region_name = f"{region_prefix}__{name}" if region_prefix else name
@@ -120,7 +93,7 @@ def _maybe_dump_tosa_artifacts(edge_program, compile_spec, tosa_bytes) -> None:
                 )
             )
 
-    dump_path = _env_get("RETAB_DUMP_TOSA", "ARM_TOSA_ENGINE_DUMP_TOSA")
+    dump_path = os.environ.get("RETAB_DUMP_TOSA")
     if dump_path:
         dump_file = Path(dump_path)
         dump_file.parent.mkdir(parents=True, exist_ok=True)
@@ -129,11 +102,7 @@ def _maybe_dump_tosa_artifacts(edge_program, compile_spec, tosa_bytes) -> None:
 
 
 def _parallel_backend_preprocess_workers() -> int:
-    raw = _env_get(
-        "RETAB_PARALLEL_BACKEND_PREPROCESS_WORKERS",
-        "ARM_TOSA_ENGINE_PARALLEL_BACKEND_PREPROCESS_WORKERS",
-        default="0",
-    )
+    raw = os.environ.get("RETAB_PARALLEL_BACKEND_PREPROCESS_WORKERS", "0")
     try:
         workers = int(raw)
     except ValueError:
@@ -171,7 +140,7 @@ def _compile_specs_safe_for_parallel(
     parse_compile_spec: Callable[[list[CompileSpec]], object],
     compile_specs,
 ) -> bool:
-    if _env_get("RETAB_DUMP_TOSA", "ARM_TOSA_ENGINE_DUMP_TOSA"):
+    if os.environ.get("RETAB_DUMP_TOSA"):
         return False
     for method_specs in compile_specs.values():
         for specs_for_program in method_specs:
@@ -583,13 +552,28 @@ def _all_rust_preprocess(
         f"[retab] passes={t_passes:.3f}s, serialize={t_total-t_passes:.3f}s, total={t_total:.3f}s"
     )
 
-    return PreprocessResult(
-        processed_bytes=tosa_bytes,
-        _delegate_info_meta=_collect_delegate_info_meta(gm),
-    )
+    # Like stock's _preprocess: the TOSA bytes and nothing else.
+    return PreprocessResult(processed_bytes=tosa_bytes)
 
 
 _all_rust_preprocess._retab_override = True
+
+
+def _preprocess(
+    edge_program: ExportedProgram, compile_spec: TosaCompileSpec
+) -> PreprocessResult:
+    """TOSABackend._preprocess while RETAB is installed: RETAB's lowering.
+
+    It carries stock's __name__ because callers find the attribute through the
+    installed function's name: rc4's misc/test_external_vela_blocks.py patches
+    `patch.object(TOSABackend, TOSABackend._preprocess.__name__, ...)`. Its
+    __qualname__ stays its own, so pickle still finds it at
+    retab.preprocess._preprocess.
+    """
+    return _all_rust_preprocess(edge_program, compile_spec)
+
+
+_preprocess._retab_override = True
 
 
 # -- Public API: backend override and compatibility fallback -----------------
@@ -647,52 +631,38 @@ def _restore_ethos_u_unused_input_guard() -> None:
     EthosUBackend.preprocess = original
 
 
-def _install_backend_preprocess_override() -> bool:
-    from executorch.backends.arm.tosa.backend import TOSABackend
-
-    install_override = getattr(TOSABackend, "set_preprocess_override", None)
-    if callable(install_override):
-        install_override(_all_rust_preprocess)
-        return True
-    return False
+_FAST_PATHS_DISABLED = (
+    "RETAB's edge-manager and run_decompositions fast paths are disabled until they "
+    "are re-derived on ExecuTorch v1.6.0-rc4: the edge-manager fast path predates rc4 "
+    "and skips its _apply_pre_decomposition_transforms (Linear APU-117). Install "
+    "RETAB without fast_paths."
+)
 
 
-def _restore_backend_preprocess_override() -> bool:
-    from executorch.backends.arm.tosa.backend import TOSABackend
-
-    clear_override = getattr(TOSABackend, "clear_preprocess_override", None)
-    if callable(clear_override):
-        clear_override()
-        return True
-    return False
+def _refuse_fast_paths(fast_paths: bool) -> None:
+    """Raise, before anything is patched, when a caller asks for the fast paths."""
+    if fast_paths:
+        raise NotImplementedError(_FAST_PATHS_DISABLED)
 
 
 def patch_tosa_backend(*, fast_paths: bool = False):
     """Install the dedicated Rust path into ExecuTorch Arm lowering.
 
-    Prefer the native ExecuTorch override seam when available. Fall back to the
-    legacy monkey-patch for older trees that do not expose it yet. `fast_paths`
-    also replaces parts of ExecuTorch's edge-manager and run_decompositions flow;
-    those paths have no test coverage on rc4, so they are opt-in.
+    Stock ExecuTorch has no preprocess override hook, so this replaces
+    TOSABackend._preprocess in place. `fast_paths=True` raises
+    NotImplementedError: RETAB's edge-manager and run_decompositions fast paths
+    stay off until they are re-derived on rc4 (Linear APU-117).
     """
+    _refuse_fast_paths(fast_paths)
     from executorch.backends.arm.tosa.backend import TOSABackend
 
     _capture_stock_tosa_backend()
     _install_ethos_u_unused_input_guard()
-    if fast_paths:
-        _install_edge_decomp_fast_path()
-        _install_run_decomp_fast_path()
 
-    if _install_backend_preprocess_override():
-        _install_parallel_backend_preprocess_multimethods()
-        logger.info(
-            "[retab] Installed TOSABackend preprocess override (all_rust mode)"
-        )
-        return
-
-    # Stock TOSABackend.preprocess and EthosUBackend both call TOSABackend._preprocess,
-    # so swapping that one attribute (keeping its name) routes every TOSA lowering here.
-    TOSABackend._preprocess = staticmethod(_all_rust_preprocess)
+    # Stock TOSABackend.preprocess, EthosUBackend and VgfBackend all call
+    # TOSABackend._preprocess, so swapping that one attribute routes every TOSA
+    # lowering here.
+    TOSABackend._preprocess = staticmethod(_preprocess)
     _install_parallel_backend_preprocess_multimethods()
     logger.info("[retab] Patched TOSABackend._preprocess (all_rust mode)")
 
@@ -700,14 +670,11 @@ def patch_tosa_backend(*, fast_paths: bool = False):
 def unpatch_tosa_backend():
     """Restore the original ExecuTorch Arm lowering path."""
 
+    # No-ops unless a caller installed the private fast-path helpers itself.
     _uninstall_run_decomp_fast_path()
     _uninstall_edge_decomp_fast_path()
     _restore_parallel_backend_preprocess_multimethods()
     _restore_ethos_u_unused_input_guard()
-
-    if _restore_backend_preprocess_override():
-        logger.info("[retab] Cleared TOSABackend preprocess override")
-        return
 
     # Restore the stock attributes in place. importlib.reload would create a second
     # TOSABackend class while other modules keep the patched one.
