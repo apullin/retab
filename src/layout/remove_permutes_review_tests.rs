@@ -17,8 +17,9 @@ const REVIEW_FIXTURE: &str =
 /// `a_none_reduction_dim_reads_as_an_empty_list`.
 const NONE_DIM_CASE: &str = "sum_with_dim_none_keepdim";
 
-/// The review cases (tests/fixtures/remove_permutes_review) match rc4, except
-/// the `None` reduction dim that RETAB's importer cannot tell from `[]`.
+/// The review cases (tests/fixtures/remove_permutes_review, recorded like the
+/// replay fixtures from rc4 with the release/1.6 backport of #24315) match,
+/// except the `None` reduction dim that RETAB's importer cannot tell from `[]`.
 #[test]
 fn review_cases_match_rc4() {
     replay::check_known(

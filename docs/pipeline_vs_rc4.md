@@ -139,7 +139,7 @@ Steps 68-86 are rc4's phase 6, in rc4's order:
 | 70 | IrRewriteConv | RewriteConvPass, :721 |
 | 71 | IrRewriteMatmulRescale | RewriteMatmulPass, :724; the serializer turns aten mm and bmm into MATMUL (rc4's ConvertMmToBmmPass, :679) |
 | 72 | IrFuseViewCopyTransform | FuseViewCopyTransformPass, :725 |
-| 73-74 | IrPropagateViewCopyPermuteDown, IrPropagateViewCopyPermuteUp | :726-727, with RemovePermutesAroundElementwiseTosaOps inside, as in rc4 |
+| 73-74 | IrPropagateViewCopyPermuteDown, IrPropagateViewCopyPermuteUp | :726-727, with RemovePermutesAroundElementwiseTosaOps inside, as in rc4, except that a lower-rank constant in a region is moved into the region's layout as upstream's fix does it (#24315, as backported to release/1.6): rc4 reshapes it where a transpose is needed, which gives wrong output, or raises |
 | 75 | IrRewritePad | RewritePadPass, :728 |
 | 76 | IrMoveDataMovementOpsToSmallerDtype | :731 |
 | 77 | IrMatchArgRanks | MatchArgRanksPass, :732 |

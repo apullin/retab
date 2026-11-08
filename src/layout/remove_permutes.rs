@@ -19,18 +19,25 @@
 //!
 //! Dim arguments in the region are remapped (cat, keepdim reductions, slice,
 //! constant pads, squeeze/unsqueeze views and the repeat_interleave triple),
-//! constants get a compensating permute (or a view when their rank is lower),
-//! numel-1 inputs stay as they are, other incoming permutes with the same
-//! permutation are bypassed too, and an outgoing permute that is not the
-//! inverse absorbs the removed one instead.
+//! constants get a compensating permute (or a view when their rank is lower,
+//! followed by a permute when the view alone would move data), numel-1 inputs
+//! stay as they are, other incoming permutes with the same permutation are
+//! bypassed too, and an outgoing permute that is not the inverse absorbs the
+//! removed one instead.
 //!
 //! # Faithfulness
 //!
 //! The detection sweep, the region search and every rewrite follow rc4 line by
-//! line; each function names the rc4 lines it mirrors. rc4's region search
-//! defers nested visits onto a stack (`visit`, `:457-485`), which is not a
-//! recursive DFS, and that order decides which permutation a node reached on
-//! two paths gets; [`Detector::visit`] keeps the same stack discipline.
+//! line; each function names the rc4 lines it mirrors. One rewrite follows
+//! upstream's fix instead: a lower-rank constant is compensated as the
+//! release/1.6 backport of #24315 does it (fork branch
+//! `retab/pick-1.6/transpose-lower-rank-constants`, 52ecaaf136), since rc4's
+//! view reshapes it where a transpose is needed, giving wrong output, or
+//! raises. The replay fixtures that reach that rewrite are generated from the
+//! backport. rc4's region search defers nested visits onto a stack (`visit`,
+//! `:457-485`), which is not a recursive DFS, and that order decides which
+//! permutation a node reached on two paths gets; [`Detector::visit`] keeps the
+//! same stack discipline.
 //!
 //! Users are visited in torch.fx's order, as rc4 iterates `node.users`
 //! (`:433`, `:566`), which the ctx tracks (`LayoutCtx::users_in_fx_order`).
@@ -1819,8 +1826,8 @@ fn permute_subgraph(
         rewrite.unused.push(input);
     }
 
-    // Compensate the constant inputs (`:840-873`), in graph order of
-    // (constant, user).
+    // Compensate the constant inputs (`:840-873`; `:840-881` with the
+    // release/1.6 backport of #24315), in graph order of (constant, user).
     let constant_edges = in_graph_order(ctx, subgraph.constant_edges_in.iter().copied());
     for (constant, user) in constant_edges {
         let const_shape = ctx.graph().node_shape_vec(constant);
@@ -1838,20 +1845,55 @@ fn permute_subgraph(
                     )
                 })
             }
+            // #24315: a view moves a lower-rank constant into the region's
+            // layout only when its non-unit dims keep their order, dropping
+            // just leading 1s. Otherwise the constant is viewed to the
+            // region's rank and permuted; rc4 viewed it either way, which
+            // reshapes where a transpose is needed, or raises.
             Some(shape) if shape.len() < permute_rank => {
                 let mut padded = vec![1; permute_rank - shape.len()];
                 padded.extend_from_slice(&shape);
-                let target_shape: Vec<i64> = node_end_perm.iter().map(|&d| padded[d]).collect();
-                let target_shape = target_shape[permute_rank - shape.len()..].to_vec();
-                let name = format!("{}_viewed", ctx.node(constant).name);
-                ctx.inserting_after(constant, |ctx| {
-                    ctx.call_function(
-                        name,
-                        VIEW_COPY,
-                        vec![IrArg::Node(constant), i64_list_arg(&target_shape)],
-                        NodeMeta::default(),
-                    )
-                })
+                let moved: Vec<usize> = node_end_perm
+                    .iter()
+                    .copied()
+                    .filter(|&d| padded[d] != 1)
+                    .collect();
+                let viewed = format!("{}_viewed", ctx.node(constant).name);
+                if moved.is_sorted() {
+                    let mut permuted: Vec<i64> = node_end_perm.iter().map(|&d| padded[d]).collect();
+                    let leading_ones = permuted[..permute_rank - shape.len()]
+                        .iter()
+                        .take_while(|&&d| d == 1)
+                        .count();
+                    permuted.drain(..leading_ones);
+                    ctx.inserting_after(constant, |ctx| {
+                        ctx.call_function(
+                            viewed,
+                            VIEW_COPY,
+                            vec![IrArg::Node(constant), i64_list_arg(&permuted)],
+                            NodeMeta::default(),
+                        )
+                    })
+                } else {
+                    let name = format!("{}_permuted", ctx.node(constant).name);
+                    let view = ctx.inserting_after(constant, |ctx| {
+                        ctx.call_function(
+                            viewed,
+                            VIEW_COPY,
+                            vec![IrArg::Node(constant), i64_list_arg(&padded)],
+                            NodeMeta::default(),
+                        )
+                    });
+                    rewrite.seeds.push(view);
+                    ctx.inserting_after(view, |ctx| {
+                        ctx.call_function(
+                            name,
+                            PERMUTE_COPY,
+                            vec![IrArg::Node(view), usize_list_arg(&node_end_perm)],
+                            NodeMeta::default(),
+                        )
+                    })
+                }
             }
             _ => continue,
         };

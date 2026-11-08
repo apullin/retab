@@ -3,8 +3,9 @@
 # Regenerate with the rc4 environment, from a neutral directory:
 #   cd /tmp && <venv>/bin/python -P <retab>/tests/fixtures/layout_replay/gen_layout_replay.py
 # executorch 1.6.0 (git 4776f71b6f0daa5dfc7d758d5836fc1cc0d40154), torch 2.15.0, python 3.12.8
+# executorch sources: git 52ecaaf13607cf02232cd22d42146f1d85ba664e, a checkout ahead of the installed package
 # seed 135: 300 random graphs, 0 of which torch rejected; format: see the generator's docstring.
-# rc4-source sha256 1fa1c52ee766b45452e3af1520ce75ddfe6b20799024bd38f8212fc9fde2daa7 backends/transforms/remove_permutes_around_elementwise_ops.py
+# rc4-source sha256 af8bbe22dad9df542578f459c4a87798bea4a718628d6c9cd2feff580fc55199 backends/transforms/remove_permutes_around_elementwise_ops.py
 # rc4-source sha256 88fe1cf799f6aeda271ec2256279715424663c265ec274e6225ba5fa9c154c08 backends/arm/_passes/remove_permutes_around_elementwise_tosa_ops.py
 # rc4-source sha256 1d3d041aa3d90d6489edeeebb086a58d1b2a05d0f838929bdcda1ec01335f1c2 backends/transforms/permute_pass_utils.py
 # rc4-source sha256 7cf10d6579a695b24888b590cd59bc6df410318dabf935f5c5212b84bdd6ee03 backends/transforms/channels_last_layout.py
@@ -318,7 +319,7 @@ after modified=true
 %3 = aten.add.Tensor(%0, %2) : torch.float32[2, 5, 4] q=none
 output([%3])
 end
-case lower_rank_constant_with_a_moved_dim_raises
+case lower_rank_constant_with_a_moved_dim_is_transposed
 before
 %0 = placeholder x : torch.float32[2, 3, 4, 5] q=none
 %1 = placeholder c : torch.float32[5, 3] kind=buffer q=none
@@ -326,8 +327,13 @@ before
 %3 = aten.mul.Tensor(%2, %1) : torch.float32[2, 4, 5, 3] q=none
 %4 = aten.permute_copy.default(%3, [0, 3, 1, 2]) : torch.float32[2, 3, 4, 5] q=none
 output([%4])
-after raises=RuntimeError
-# rc4: shape '[1, 5]' is invalid for input of size 15 While executing %aten_view_copy_default : [num_users=1] = call_function[target=executorch.exir.dialects.edge._ops.aten.view_copy.default](args = (%c, [1, 5]), kwargs = {}) Original traceback: None Use tlparse to see full graph. (https://github.com/pytor
+after modified=true
+%0 = placeholder x : torch.float32[2, 3, 4, 5] q=none
+%1 = placeholder c : torch.float32[5, 3] kind=buffer q=none
+%2 = aten.view_copy.default(%1, [1, 1, 5, 3]) : torch.float32[1, 1, 5, 3] q=none
+%3 = aten.permute_copy.default(%2, [0, 3, 1, 2]) : torch.float32[1, 3, 1, 5] q=none
+%4 = aten.mul.Tensor(%0, %3) : torch.float32[2, 3, 4, 5] q=none
+output([%4])
 end
 case keepdim_reductions_remap_their_dims
 before
@@ -2878,8 +2884,14 @@ before
 %6 = aten.slice_copy.Tensor(%5, dim=1, start=0, end=5) : torch.int32[5, 5] q=none
 %7 = aten.permute_copy.default(%6, [1, 0]) : torch.int32[5, 5] q=none
 output([%7])
-after raises=RuntimeError
-# rc4: shape '[1]' is invalid for input of size 5 While executing %aten_view_copy_default : [num_users=1] = call_function[target=executorch.exir.dialects.edge._ops.aten.view_copy.default](args = (%w3, [1]), kwargs = {}) Original traceback: None Use tlparse to see full graph. (https://github.com/pytorch/tlp
+after modified=true
+%0 = placeholder b_1 : torch.int32[5, 5] q=none
+%1 = placeholder x2 : torch.int32[1] q=none
+%2 = placeholder w3 : torch.int32[5] kind=param q=none
+%3 = aten.view_copy.default(%2, [5, 1]) : torch.int32[5, 1] q=none
+%4 = aten.minimum.default(%0, %3) : torch.int32[5, 5] q=none
+%5 = aten.slice_copy.Tensor(%4, dim=0, start=0, end=5) : torch.int32[5, 5] q=none
+output([%5])
 end
 case random_38
 before
@@ -3315,8 +3327,15 @@ before
 %11 = aten.mul.Tensor(%6, 2.0) : torch.float32[] q=none dead
 %12 = aten.permute_copy.default(%9, []) : torch.float32[] q=none
 output([%5, %12])
-after raises=RuntimeError
-# rc4: shape '[1, 4, 1]' is invalid for input of size 20 While executing %aten_view_copy_default : [num_users=1] = call_function[target=executorch.exir.dialects.edge._ops.aten.view_copy.default](args = (%w2, [1, 4, 1]), kwargs = {}) Original traceback: None Use tlparse to see full graph. (https://github.co
+after modified=true
+%0 = placeholder x1 : torch.float32[5, 2, 4, 1] q=none
+%1 = placeholder w2 : torch.float32[1, 5, 4] kind=param q=none
+%2 = aten.view_copy.default(%1, [5, 1, 4, 1]) : torch.float32[5, 1, 4, 1] q=none
+%3 = placeholder x3 : torch.float32[] q=none
+%4 = aten.maximum.default(%0, %2) : torch.float32[5, 2, 4, 1] q=none
+%5 = aten.relu.default(%3) : torch.float32[] q=none
+%6 = aten.neg.default(%5) : torch.float32[] q=none
+output([%4, %6])
 end
 case random_51
 before
@@ -3699,8 +3718,25 @@ before
 %27 = aten.permute_copy.default(%23, [1, 0]) : torch.float32[4, 1] q=none
 %28 = aten.permute_copy.default(%25, [3, 1, 2, 0]) : torch.float32[4, 1, 1, 1] q=none
 output([%14, %21, %22, %27, %28])
-after raises=RuntimeError
-# rc4: shape '[1]' is invalid for input of size 4 While executing %aten_view_copy_default_1 : [num_users=1] = call_function[target=executorch.exir.dialects.edge._ops.aten.view_copy.default](args = (%w2, [1]), kwargs = {}) Original traceback: None Use tlparse to see full graph. (https://github.com/pytorch/t
+after modified=true
+%0 = placeholder x1 : torch.float32[4, 3, 2] q=none
+%1 = placeholder w2 : torch.float32[4] kind=param q=none
+%2 = aten.view_copy.default(%1, [4, 1, 1]) : torch.float32[4, 1, 1] q=none
+%3 = placeholder c_3 : torch.int32[] q=none
+%4 = placeholder x4 : torch.int8[] q=none
+%5 = placeholder x5 : torch.float32[4, 1] q=none
+%6 = placeholder w6 : torch.float32[1, 1, 1, 4] kind=buffer q=none
+%7 = aten.hardswish.default(%0) : torch.float32[4, 3, 2] q=none
+%8 = aten.mul.Tensor(%7, %2) : torch.float32[4, 3, 2] q=none
+%9 = tosa.RESCALE.default(%3, torch.int8, [0.5], 0, 0) : torch.int8[] q=none
+%10 = aten.maximum.default(%4, %9) : torch.int8[] q=none
+%11 = aten.sub.Tensor(%10, %10) : torch.int8[] q=none
+%12 = aten.abs.default(%11) : torch.int8[] q=none
+%13 = tosa.RESCALE.default(%12, torch.int32, [0.5], 0, 0) : torch.int32[] q=none
+%14 = aten.permute_copy.default(%5, [1, 0]) : torch.float32[1, 4] q=none
+%15 = aten.view_copy.default(%5, [4, 1, 1, 1]) : torch.float32[4, 1, 1, 1] q=none
+%16 = aten.permute_copy.default(%14, [1, 0]) : torch.float32[4, 1] q=none
+output([%8, %13, %13, %16, %15])
 end
 case random_62
 before
@@ -3825,8 +3861,25 @@ before
 %18 = aten.permute_copy.default(%16, [2, 1, 3, 0, 4]) : torch.float32[2, 5, 2, 4, 3] q=none dead
 %19 = aten.permute_copy.default(%14, [2, 3, 1, 4, 0]) : torch.float32[2, 2, 5, 3, 4] q=none
 output([%12, %19, %17])
-after raises=RuntimeError
-# rc4: shape '[1]' is invalid for input of size 2 While executing %aten_view_copy_default_1 : [num_users=1] = call_function[target=executorch.exir.dialects.edge._ops.aten.view_copy.default](args = (%w2, [1]), kwargs = {}) Original traceback: None Use tlparse to see full graph. (https://github.com/pytorch/t
+after modified=true
+%0 = placeholder w1 : torch.int32[2, 4, 5] kind=param q=none
+%1 = placeholder w2 : torch.int32[2] kind=param q=none
+%2 = aten.view_copy.default(%1, [2, 1]) : torch.int32[2, 1] q=none
+%3 = placeholder x3 : torch.float32[2, 2, 5, 3, 4] q=none
+%4 = placeholder x4 : torch.float32[2, 2, 5, 3, 4] q=none
+%5 = aten.permute_copy.default(%0, [1, -3, 2]) : torch.int32[4, 2, 5] q=none
+%6 = aten.minimum.default(%2, %5) : torch.int32[4, 2, 5] q=none
+%7 = aten.permute_copy.default(%6, [1, 0, 2]) : torch.int32[2, 4, 5] q=none
+%8 = aten.neg.default(%7) : torch.int32[2, 4, 5] q=none
+%9 = aten.view_copy.default(%8, [2, 4, 1, 5]) : torch.int32[2, 4, 1, 5] q=none
+%10 = aten.permute_copy.default(%9, [1, 3, 2, 0]) : torch.int32[4, 5, 1, 2] q=none
+%11 = aten.permute_copy.default(%3, [-1, 2, 0, 1, -2]) : torch.float32[4, 5, 2, 2, 3] q=none
+%12 = aten.leaky_relu.default(%11) : torch.float32[4, 5, 2, 2, 3] q=none
+%13 = aten.permute_copy.default(%4, [4, 2, 0, 1, 3]) : torch.float32[4, 5, 2, 2, 3] q=none
+%14 = aten.minimum.default(%12, %13) : torch.float32[4, 5, 2, 2, 3] q=none
+%15 = aten.maximum.default(%14, %11) : torch.float32[4, 5, 2, 2, 3] q=none
+%16 = aten.permute_copy.default(%12, [2, 3, 1, 4, 0]) : torch.float32[2, 2, 5, 3, 4] q=none
+output([%10, %16, %15])
 end
 case random_66
 before
@@ -4357,8 +4410,32 @@ before
 %25 = aten.slice_copy.Tensor(%24, dim=2, start=0, end=4) : torch.float32[4, 4, 4, 1] q=none dead
 %26 = aten.permute_copy.default(%24, [1, 2, 3, 0]) : torch.float32[4, 4, 1, 4] q=none
 output([%10, %11, %23, %26, %17, %22])
-after raises=RuntimeError
-# rc4: shape '[1]' is invalid for input of size 3 While executing %aten_view_copy_default : [num_users=1] = call_function[target=executorch.exir.dialects.edge._ops.aten.view_copy.default](args = (%w2, [1]), kwargs = {}) Original traceback: None Use tlparse to see full graph. (https://github.com/pytorch/tlp
+after modified=true
+%0 = placeholder x1 : torch.float32[3, 3, 1] q=none
+%1 = placeholder w2 : torch.float32[3] kind=param q=none
+%2 = aten.view_copy.default(%1, [3, 1, 1]) : torch.float32[3, 1, 1] q=none
+%3 = placeholder x3 : torch.float32[5, 1, 1, 5] q=none
+%4 = placeholder w4 : torch.float32[5, 1, 1, 5] kind=constant q=none
+%5 = placeholder x5 : torch.float32[4, 4, 1, 4] q=none
+%6 = aten.add.Tensor(%0, %2) : torch.float32[3, 3, 1] q=none
+%7 = aten.full.default([1, 3, 3], 0.5, dtype=torch.float32) : torch.float32[1, 3, 3] q=none
+%8 = aten.permute_copy.default(%7, [2, 1, 0]) : torch.float32[3, 3, 1] q=none
+%9 = aten.maximum.default(%0, %8) : torch.float32[3, 3, 1] q=none
+%10 = aten.cat.default([%9, %6], 0) : torch.float32[6, 3, 1] q=none
+%11 = aten.permute_copy.default(%10, [0, 2, 1]) : torch.float32[6, 1, 3] q=none
+%12 = aten.permute_copy.default(%10, [2, 0, 1]) : torch.float32[1, 6, 3] q=none
+%13 = aten.permute_copy.default(%3, [0, 2, 1, -1]) : torch.float32[5, 1, 1, 5] q=none
+%14 = aten.pad.default(%13, [0, 1, 1, 1, 1, 1], "constant", 0.0) : torch.float32[5, 3, 3, 6] q=none
+%15 = aten.mean.dim(%14, [2, -1, 0, -3], keepdim=True) : torch.float32[1, 1, 1, 1] q=none
+%16 = aten.sub.Tensor(%14, %15) : torch.float32[5, 3, 3, 6] q=none
+%17 = aten.hardtanh.default(%16) : torch.float32[5, 3, 3, 6] q=none
+%18 = aten.constant_pad_nd.default(%16, [0, 1, 2, 0, 0, 1, 0, 1], 0.0) : torch.float32[6, 4, 5, 7] q=none
+%19 = aten.amax.default(%16, [-1, -4, 1, 2], True) : torch.float32[1, 1, 1, 1] q=none
+%20 = aten.sub.Tensor(%16, %19) : torch.float32[5, 3, 3, 6] q=none
+%21 = aten.permute_copy.default(%18, [0, 2, 1, 3]) : torch.float32[6, 5, 4, 7] q=none
+%22 = aten.permute_copy.default(%5, [3, 0, 1, 2]) : torch.float32[4, 4, 4, 1] q=none
+%23 = aten.permute_copy.default(%22, [1, 2, 3, 0]) : torch.float32[4, 4, 1, 4] q=none
+output([%11, %12, %21, %23, %17, %20])
 end
 case random_80
 before
@@ -5743,8 +5820,19 @@ before
 %12 = aten.abs.default(%9) : torch.int32[2, 5, 4, 3] q=none
 %13 = aten.slice_copy.Tensor(%12, 0, 0, 2) : torch.int32[2, 5, 4, 3] q=none
 output([%7, %13, %10, %11])
-after raises=RuntimeError
-# rc4: shape '[1]' is invalid for input of size 4 While executing %aten_view_copy_default : [num_users=1] = call_function[target=executorch.exir.dialects.edge._ops.aten.view_copy.default](args = (%w2, [1]), kwargs = {}) Original traceback: None Use tlparse to see full graph. (https://github.com/pytorch/tlp
+after modified=true
+%0 = placeholder x1 : torch.float32[4, 2, 4, 5] q=none
+%1 = placeholder w2 : torch.float32[4] kind=param q=none
+%2 = aten.view_copy.default(%1, [4, 1]) : torch.float32[4, 1] q=none
+%3 = placeholder x3 : torch.int32[3, 4, 2, 5] q=none
+%4 = aten.maximum.default(%2, %0) : torch.float32[4, 2, 4, 5] q=none
+%5 = aten.permute_copy.default(%3, [2, 3, 1, 0]) : torch.int32[2, 5, 4, 3] q=none
+%6 = aten.neg.default(%5) : torch.int32[2, 5, 4, 3] q=none
+%7 = aten.minimum.default(%6, %6) : torch.int32[2, 5, 4, 3] q=none
+%8 = tosa.RESCALE.default(%5, torch.int8, [0.5], 0, 0) : torch.int8[2, 5, 4, 3] q=none
+%9 = aten.abs.default(%6) : torch.int32[2, 5, 4, 3] q=none
+%10 = aten.slice_copy.Tensor(%9, 0, 0, 2) : torch.int32[2, 5, 4, 3] q=none
+output([%4, %10, %7, %8])
 end
 case random_120
 before
@@ -7195,8 +7283,31 @@ before
 %24 = aten.permute_copy.default(%22, [1, 2, 0]) : torch.float32[3, 5, 5] q=none
 %25 = aten.permute_copy.default(%23, [1, 2, 0]) : torch.float32[3, 5, 5] q=none
 output([%13, %19, %24, %25, %12, %20])
-after raises=RuntimeError
-# rc4: shape '[1]' is invalid for input of size 2 While executing %aten_view_copy_default_3 : [num_users=1] = call_function[target=executorch.exir.dialects.edge._ops.aten.view_copy.default](args = (%w4, [1]), kwargs = {}) Original traceback: None Use tlparse to see full graph. (https://github.com/pytorch/t
+after modified=true
+%0 = placeholder x1 : torch.float32[3, 1, 3, 1] q=none
+%1 = placeholder x2 : torch.float32[2, 1, 3] q=none
+%2 = placeholder w3 : torch.float32[3, 1, 1] kind=buffer q=none
+%3 = aten.permute_copy.default(%2, [1, 2, 0]) : torch.float32[1, 1, 3] q=none
+%4 = placeholder w4 : torch.float32[2] kind=param q=none
+%5 = aten.view_copy.default(%4, [2, 1]) : torch.float32[2, 1] q=none
+%6 = placeholder x5 : torch.float32[1, 1] q=none
+%7 = placeholder x6 : torch.float32[3, 5, 5] q=none
+%8 = placeholder x7 : torch.float32[3] q=none
+%9 = placeholder x8 : torch.float32[1, 1, 1] q=none
+%10 = aten.permute_copy.default(%0, [0, 2, 1, -1]) : torch.float32[3, 3, 1, 1] q=none
+%11 = aten.unsqueeze_copy.default(%10, 3) : torch.float32[3, 3, 1, 1, 1] q=none
+%12 = aten.expand_copy.default(%11, [3, 3, 1, 3, 1]) : torch.float32[3, 3, 1, 3, 1] q=none
+%13 = aten.view_copy.default(%12, [3, 3, 3, 1]) : torch.float32[3, 3, 3, 1] q=none
+%14 = aten.cat.default([%13, %13], dim=-1) : torch.float32[3, 3, 3, 2] q=none
+%15 = aten.permute_copy.default(%13, [0, 2, 1, 3]) : torch.float32[3, 3, 3, 1] q=none
+%16 = aten.maximum.default(%1, %3) : torch.float32[2, 1, 3] q=none
+%17 = aten.view_copy.default(%16, [2, 3]) : torch.float32[2, 3] q=none
+%18 = aten.add.Tensor(%17, %5) : torch.float32[2, 3] q=none
+%19 = aten.permute_copy.default(%7, [2, -3, 1]) : torch.float32[5, 3, 5] q=none
+%20 = aten.view_copy.default(%8, [3, 1, 1]) : torch.float32[3, 1, 1] q=none
+%21 = aten.maximum.default(%7, %20) : torch.float32[3, 5, 5] q=none
+%22 = aten.minimum.default(%9, %21) : torch.float32[3, 5, 5] q=none
+output([%15, %18, %21, %22, %14, %19])
 end
 case random_160
 before
@@ -7713,8 +7824,22 @@ before
 %25 = aten.mul.Tensor(%5, %21) : torch.float32[3, 1, 5, 2] q=none
 %26 = aten.permute_copy.default(%25, [1, 2, 3, 0]) : torch.float32[1, 5, 2, 3] q=none
 output([%9, %16, %26])
-after raises=RuntimeError
-# rc4: shape '[2, 1]' is invalid for input of size 10 While executing %aten_view_copy_default_2 : [num_users=1] = call_function[target=executorch.exir.dialects.edge._ops.aten.view_copy.default](args = (%w6, [2, 1]), kwargs = {}) Original traceback: None Use tlparse to see full graph. (https://github.com/py
+after modified=true
+%0 = placeholder x1 : torch.float32[3, 2, 2] q=none
+%1 = placeholder x2 : torch.float32[1] q=none
+%2 = placeholder x3 : torch.int32[2, 3, 4] q=none
+%3 = placeholder w4 : torch.int32[4, 1, 3] kind=constant q=none
+%4 = placeholder x5 : torch.float32[1, 5, 2, 3] q=none
+%5 = placeholder w6 : torch.float32[5, 2] kind=param q=none
+%6 = aten.view_copy.default(%5, [5, 2, 1]) : torch.float32[5, 2, 1] q=none
+%7 = aten.maximum.default(%0, %1) : torch.float32[3, 2, 2] q=none
+%8 = aten.view_copy.default(%2, [2, 1, 3, 4, 1]) : torch.int32[2, 1, 3, 4, 1] q=none
+%9 = aten.neg.default(%8) : torch.int32[2, 1, 3, 4, 1] q=none
+%10 = aten.add.Tensor(%4, %4) : torch.float32[1, 5, 2, 3] q=none
+%11 = aten.sigmoid.default(%10) : torch.float32[1, 5, 2, 3] q=in{0}/out{0}
+%12 = aten.hardswish.default(%11) : torch.float32[1, 5, 2, 3] q=none
+%13 = aten.mul.Tensor(%6, %12) : torch.float32[1, 5, 2, 3] q=none
+output([%7, %9, %13])
 end
 case random_180
 before
@@ -9208,8 +9333,27 @@ before
 %25 = aten.add.Tensor(%7, %24) : torch.int32[4, 1, 2] q=none
 %26 = aten.permute_copy.default(%25, [0, 2, 1]) : torch.int32[4, 2, 1] q=none
 output([%12, %13, %18, %26])
-after raises=RuntimeError
-# rc4: shape '[1, 2]' is invalid for input of size 8 While executing %aten_view_copy_default : [num_users=1] = call_function[target=executorch.exir.dialects.edge._ops.aten.view_copy.default](args = (%w7, [1, 2]), kwargs = {}) Original traceback: None Use tlparse to see full graph. (https://github.com/pytor
+after modified=true
+%0 = placeholder x1 : torch.float32[] q=none
+%1 = placeholder w2 : torch.float32[] kind=constant q=none
+%2 = placeholder x3 : torch.float32[2, 1, 4, 2, 1] q=none
+%3 = placeholder w4 : torch.float32[2, 2, 4, 1, 1] kind=constant q=none
+%4 = placeholder x5 : torch.int32[4, 1, 2] q=none
+%5 = placeholder x6 : torch.int32[4, 1, 2] q=none
+%6 = placeholder w7 : torch.int32[2, 4] kind=param q=none
+%7 = aten.view_copy.default(%6, [1, 2, 4]) : torch.int32[1, 2, 4] q=none
+%8 = aten.permute_copy.default(%7, [2, 0, 1]) : torch.int32[4, 1, 2] q=none
+%9 = placeholder w8 : torch.int32[1, 2] kind=param q=none
+%10 = aten.mul.Tensor(%1, %0) : torch.float32[] q=none
+%11 = quantized_decomposed.quantize_per_tensor.default(%10, 0.5, 0, -128, 127, torch.int8) : torch.int8[] q=none
+%12 = quantized_decomposed.dequantize_per_tensor.default(%11, 0.5, 0, -128, 127, torch.int8) : torch.float32[] q=none
+%13 = aten.mean.dim(%2, [1], True) : torch.float32[2, 1, 4, 2, 1] q=none
+%14 = aten.sub.Tensor(%2, %13) : torch.float32[2, 1, 4, 2, 1] q=none
+%15 = aten.add.Tensor(%4, %5) : torch.int32[4, 1, 2] q=none
+%16 = aten.mul.Tensor(%15, %8) : torch.int32[4, 1, 2] q=none
+%17 = aten.add.Tensor(%9, %16) : torch.int32[4, 1, 2] q=none
+%18 = aten.permute_copy.default(%17, [0, 2, 1]) : torch.int32[4, 2, 1] q=none
+output([%12, %10, %14, %18])
 end
 case random_220
 before
@@ -10296,8 +10440,24 @@ before
 %17 = aten.permute_copy.default(%14, [2, 3, 1, 0]) : torch.float32[2, 1, 5, 2] q=none
 %18 = aten.permute_copy.default(%16, [2, 0, 1, 3]) : torch.float32[2, 2, 5, 1] q=none
 output([%8, %9, %12, %17, %18, %14])
-after raises=RuntimeError
-# rc4: shape '[1]' is invalid for input of size 3 While executing %aten_view_copy_default : [num_users=1] = call_function[target=executorch.exir.dialects.edge._ops.aten.view_copy.default](args = (%w4, [1]), kwargs = {}) Original traceback: None Use tlparse to see full graph. (https://github.com/pytorch/tlp
+after modified=true
+%0 = placeholder x1 : torch.float32[5, 2, 4] q=none
+%1 = placeholder w2 : torch.float32[5, 2, 4] kind=constant q=none
+%2 = aten.permute_copy.default(%1, [0, 1, 2]) : torch.float32[5, 2, 4] q=none
+%3 = placeholder x3 : torch.float32[3, 1, 5] q=none
+%4 = placeholder w4 : torch.float32[3] kind=param q=none
+%5 = aten.view_copy.default(%4, [3, 1, 1]) : torch.float32[3, 1, 1] q=none
+%6 = placeholder x5 : torch.float32[2, 1, 5, 2] q=none
+%7 = aten.minimum.default(%0, %2) : torch.float32[5, 2, 4] q=none
+%8 = aten.slice_copy.Tensor(%7, dim=0, start=0, end=4) : torch.float32[4, 2, 4] q=none
+%9 = aten.sub.Tensor(%5, %3) : torch.float32[3, 1, 5] q=none
+%10 = aten.permute_copy.default(%6, [3, 2, 0, 1]) : torch.float32[2, 5, 2, 1] q=none
+%11 = aten.neg.default(%10) : torch.float32[2, 5, 2, 1] q=none
+%12 = aten.amax.default(%11, [0, -1], keepdim=True) : torch.float32[1, 5, 2, 1] q=none
+%13 = aten.sub.Tensor(%11, %12) : torch.float32[2, 5, 2, 1] q=none
+%14 = aten.permute_copy.default(%11, [2, 3, 1, 0]) : torch.float32[2, 1, 5, 2] q=none
+%15 = aten.permute_copy.default(%13, [2, 0, 1, 3]) : torch.float32[2, 2, 5, 1] q=none
+output([%7, %8, %9, %14, %15, %11])
 end
 case random_255
 before

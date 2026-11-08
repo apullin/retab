@@ -1,5 +1,6 @@
 # The graphs rc4's RemovePermutesAroundElementwiseOps tests hand the pass, and what it returns.
 # Recorded by tests/fixtures/remove_permutes_upstream/record_rc4_test_calls.py; don't edit by hand.
+# executorch sources: git 52ecaaf13607cf02232cd22d42146f1d85ba664e
 case test_constant_input_cache_refreshes_for_reused_pass#0
 before
 %0 = placeholder first_constant : torch.float32[1] kind=param q=none
@@ -2938,6 +2939,114 @@ after modified=true
 %1099 = aten.hardtanh.default(%1098) : torch.float32[1, 2, 3] q=none
 %1100 = aten.hardtanh.default(%1099) : torch.float32[1, 2, 3] q=none
 output([%1100])
+end
+case test_lower_rank_constant_is_transposed_into_region_layout#0
+before
+%0 = placeholder x : torch.float32[1, 4, 6] q=none
+%1 = placeholder p_const : torch.float32[6, 4] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 6, 4] q=none
+%3 = aten.add.Tensor(%2, %1) : torch.float32[1, 6, 4] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 1]) : torch.float32[1, 4, 6] q=none
+output([%4])
+after modified=true
+%0 = placeholder x : torch.float32[1, 4, 6] q=none
+%1 = placeholder p_const : torch.float32[6, 4] q=none
+%2 = aten.view_copy.default(%1, [1, 6, 4]) : torch.float32[1, 6, 4] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 1]) : torch.float32[1, 4, 6] q=none
+%4 = aten.add.Tensor(%0, %3) : torch.float32[1, 4, 6] q=none
+output([%4])
+end
+case test_lower_rank_constant_is_transposed_into_region_layout#1
+before
+%0 = placeholder x : torch.float32[1, 4, 6] q=none
+%1 = placeholder p_const : torch.float32[4] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 6, 4] q=none
+%3 = aten.add.Tensor(%2, %1) : torch.float32[1, 6, 4] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 1]) : torch.float32[1, 4, 6] q=none
+output([%4])
+after modified=true
+%0 = placeholder x : torch.float32[1, 4, 6] q=none
+%1 = placeholder p_const : torch.float32[4] q=none
+%2 = aten.view_copy.default(%1, [4, 1]) : torch.float32[4, 1] q=none
+%3 = aten.add.Tensor(%0, %2) : torch.float32[1, 4, 6] q=none
+output([%3])
+end
+case test_lower_rank_constant_is_transposed_into_region_layout#2
+before
+%0 = placeholder x : torch.float32[1, 4, 6] q=none
+%1 = placeholder p_const : torch.float32[6, 1] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 6, 4] q=none
+%3 = aten.add.Tensor(%2, %1) : torch.float32[1, 6, 4] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 1]) : torch.float32[1, 4, 6] q=none
+output([%4])
+after modified=true
+%0 = placeholder x : torch.float32[1, 4, 6] q=none
+%1 = placeholder p_const : torch.float32[6, 1] q=none
+%2 = aten.view_copy.default(%1, [1, 6]) : torch.float32[1, 6] q=none
+%3 = aten.add.Tensor(%0, %2) : torch.float32[1, 4, 6] q=none
+output([%3])
+end
+case test_lower_rank_constant_is_transposed_into_region_layout#3
+before
+%0 = placeholder x : torch.float32[1, 3, 4, 5] q=none
+%1 = placeholder p_const : torch.float32[4, 5, 3] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 4, 5, 3] q=none
+%3 = aten.add.Tensor(%2, %1) : torch.float32[1, 4, 5, 3] q=none
+%4 = aten.permute_copy.default(%3, [0, 3, 1, 2]) : torch.float32[1, 3, 4, 5] q=none
+output([%4])
+after modified=true
+%0 = placeholder x : torch.float32[1, 3, 4, 5] q=none
+%1 = placeholder p_const : torch.float32[4, 5, 3] q=none
+%2 = aten.view_copy.default(%1, [1, 4, 5, 3]) : torch.float32[1, 4, 5, 3] q=none
+%3 = aten.permute_copy.default(%2, [0, 3, 1, 2]) : torch.float32[1, 3, 4, 5] q=none
+%4 = aten.add.Tensor(%0, %3) : torch.float32[1, 3, 4, 5] q=none
+output([%4])
+end
+case test_lower_rank_constant_is_transposed_into_region_layout#4
+before
+%0 = placeholder x : torch.float32[1, 3, 4, 5] q=none
+%1 = placeholder p_const : torch.float32[5, 3] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 4, 5, 3] q=none
+%3 = aten.add.Tensor(%2, %1) : torch.float32[1, 4, 5, 3] q=none
+%4 = aten.permute_copy.default(%3, [0, 3, 1, 2]) : torch.float32[1, 3, 4, 5] q=none
+output([%4])
+after modified=true
+%0 = placeholder x : torch.float32[1, 3, 4, 5] q=none
+%1 = placeholder p_const : torch.float32[5, 3] q=none
+%2 = aten.view_copy.default(%1, [1, 1, 5, 3]) : torch.float32[1, 1, 5, 3] q=none
+%3 = aten.permute_copy.default(%2, [0, 3, 1, 2]) : torch.float32[1, 3, 1, 5] q=none
+%4 = aten.add.Tensor(%0, %3) : torch.float32[1, 3, 4, 5] q=none
+output([%4])
+end
+case test_lower_rank_constant_is_transposed_into_region_layout#5
+before
+%0 = placeholder x : torch.float32[1, 3, 4, 5] q=none
+%1 = placeholder p_const : torch.float32[3] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 4, 5, 3] q=none
+%3 = aten.add.Tensor(%2, %1) : torch.float32[1, 4, 5, 3] q=none
+%4 = aten.permute_copy.default(%3, [0, 3, 1, 2]) : torch.float32[1, 3, 4, 5] q=none
+output([%4])
+after modified=true
+%0 = placeholder x : torch.float32[1, 3, 4, 5] q=none
+%1 = placeholder p_const : torch.float32[3] q=none
+%2 = aten.view_copy.default(%1, [3, 1, 1]) : torch.float32[3, 1, 1] q=none
+%3 = aten.add.Tensor(%0, %2) : torch.float32[1, 3, 4, 5] q=none
+output([%3])
+end
+case test_lower_rank_constant_is_transposed_into_region_layout#6
+before
+%0 = placeholder x : torch.float32[1, 3, 4, 5] q=none
+%1 = placeholder p_const : torch.float32[4, 1, 1] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 4, 5, 3] q=none
+%3 = aten.add.Tensor(%2, %1) : torch.float32[1, 4, 5, 3] q=none
+%4 = aten.permute_copy.default(%3, [0, 3, 1, 2]) : torch.float32[1, 3, 4, 5] q=none
+output([%4])
+after modified=true
+%0 = placeholder x : torch.float32[1, 3, 4, 5] q=none
+%1 = placeholder p_const : torch.float32[4, 1, 1] q=none
+%2 = aten.view_copy.default(%1, [1, 4, 1]) : torch.float32[1, 4, 1] q=none
+%3 = aten.add.Tensor(%0, %2) : torch.float32[1, 3, 4, 5] q=none
+output([%3])
 end
 case test_no_permutes_is_noop#0
 before
