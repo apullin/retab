@@ -8,15 +8,19 @@
 //!   `backends/transforms/test/test_permute_optimization_passes.py`
 //!   (`RemovePermutesAcrossViewTest`, `RemovePermutesAroundRepeatInterleaveTest`,
 //!   `RemovePermutesAroundElementwiseOpsTest` and `LayoutPermuteVisibilityTest`,
-//!   43 tests), run with the base pass as rc4 constructs it there.
+//!   44 tests), run with the base pass as rc4 constructs it there.
 //!
-//! Each test replays the calls rc4's test made, recorded in
+//! The sources are rc4 with the release/1.6 backport of #24315, which adds
+//! one of those tests, `test_lower_rank_constant_is_transposed_into_region_layout`,
+//! and the fix for lower-rank constants that the port follows. Each test
+//! replays the calls its ExecuTorch test made, recorded in
 //! tests/fixtures/remove_permutes_upstream/rc4_test_calls.txt by running the
-//! test under rc4 with the pass instrumented (see the recorder's docstring):
-//! the port must return rc4's graph exactly (see `replay` for what is
-//! compared). Then the test's own assertions run on the port's result. rc4's
+//! test there with the pass instrumented (see the recorder's docstring): the
+//! port must return that pass's graph exactly (see `replay` for what is
+//! compared). Then the test's own assertions run on the port's result. The
 //! numeric checks (`validate_numerics`, `assert_close`) need execution, which
-//! RETAB does not have; matching rc4's graph node for node stands in for them.
+//! RETAB does not have; matching the recorded graph node for node stands in
+//! for them.
 
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::layout::remove_permutes::{
@@ -433,6 +437,54 @@ fn permute_bypassed_by_one_region_is_kept_by_another() {
     assert!(modified);
 }
 
+/// `test_lower_rank_constant_is_transposed_into_region_layout`, #24315's
+/// regression test: a lower-rank constant whose non-unit dims the end
+/// permutation reorders is viewed to the region's rank and permuted; one whose
+/// non-unit dims keep their order gets a single view that drops only leading
+/// 1s. rc4 views every such constant to the permuted shape minus its leading
+/// dims: call #0's `[6, 4]` becomes `[4, 6]`, silently wrong output, and call
+/// #1's `[4]` becomes `[1]`, which raises.
+#[test]
+fn lower_rank_constant_is_transposed_into_region_layout() {
+    // Per recorded call: the view of the constant, and the permute after it.
+    let calls: [(&[i64], Option<&[i64]>); 7] = [
+        (&[1, 6, 4], Some(&[0, 2, 1])),
+        (&[4, 1], None),
+        (&[1, 6], None),
+        (&[1, 4, 5, 3], Some(&[0, 3, 1, 2])),
+        (&[1, 1, 5, 3], Some(&[0, 3, 1, 2])),
+        (&[3, 1, 1], None),
+        (&[1, 4, 1], None),
+    ];
+    for (call, (shape, dims)) in calls.into_iter().enumerate() {
+        let test = format!("test_lower_rank_constant_is_transposed_into_region_layout#{call}");
+        let (graph, modified) = base(&test);
+        assert!(modified, "{test}");
+        assert_eq!(
+            count(&graph, PERMUTE),
+            usize::from(dims.is_some()),
+            "{test}"
+        );
+        let add = live_calls(&graph, "aten.add.Tensor")[0];
+        let [input, mut operand] = node_args(&graph, add)[..] else {
+            panic!("{test}: the add reads two nodes");
+        };
+        assert_eq!(input, named(&graph, "x"), "{test}");
+        if let Some(dims) = dims {
+            assert_eq!(graph.node(operand).target, PERMUTE, "{test}");
+            assert_eq!(int_list(&graph, operand, 1), dims, "{test}");
+            operand = node_args(&graph, operand)[0];
+        }
+        assert_eq!(graph.node(operand).target, VIEW, "{test}");
+        assert_eq!(
+            node_args(&graph, operand),
+            [named(&graph, "p_const")],
+            "{test}"
+        );
+        assert_eq!(int_list(&graph, operand, 1), shape, "{test}");
+    }
+}
+
 /// `LayoutPermuteVisibilityTest.test_inverse_layout_copy_pair_around_elementwise_is_removed`:
 /// `channels_last.permute_copy` counts as a permute.
 #[test]
@@ -497,9 +549,10 @@ fn every_recorded_call_is_ported() {
         "test_view_seeded_region_with_shared_view",
         "test_chained_regions_absorb_into_last_permute",
         "test_permute_bypassed_by_one_region_is_kept_by_another",
+        "test_lower_rank_constant_is_transposed_into_region_layout",
         "test_inverse_layout_copy_pair_around_elementwise_is_removed",
     ];
-    assert_eq!(ported.len(), 51);
+    assert_eq!(ported.len(), 52);
     for case in replay::parse(CALLS).expect("the recorded calls parse") {
         let test = case.name.split('#').next().unwrap_or_default();
         assert!(ported.contains(&test), "recorded call {} is not ported", case.name);

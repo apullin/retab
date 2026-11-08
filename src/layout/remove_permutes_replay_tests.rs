@@ -3,7 +3,9 @@
 //! must match what the real rc4 pass did (see `replay` for what is compared),
 //! except the divergences listed with their reasons. So must every case of
 //! tests/fixtures/layout_replay/remove_permutes_user_order.txt, whose graphs
-//! have users out of graph order.
+//! have users out of graph order. Both fixtures record rc4 with the
+//! release/1.6 backport of #24315, whose compensation of lower-rank constants
+//! the port follows (see the generator's docstring).
 
 use crate::fx_ir::{IrGraph, NodeId};
 use crate::layout::ctx::LayoutCtx;
