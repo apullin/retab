@@ -10,17 +10,22 @@
 //! - the scalar shifts, for every dtype;
 //! - eq.Scalar and ne.Scalar on a bool tensor (APU-123).
 //!
-//! For the other ops the serializer gives the scalar operand its constant,
-//! which TOSA accepts for every dtype but one: EQUAL takes no bool inputs. A
-//! bool `x == True` that reaches the serializer as an eq.Scalar becomes an
-//! EQUAL on bool, which the reference model and Vela reject. As in rc4, the
-//! rewrite makes it an eq.Tensor whose second operand is a bool `full`, so
+//! For the other ops the serializer gives the scalar operand its constant.
+//! Only a bool eq needs rc4's tensor form, because rc4 splits a bool
+//! eq.Tensor into logical ops: TOSA's EQUAL takes no bool inputs. A bool
+//! `x == True` that reaches the serializer as an eq.Scalar becomes an EQUAL
+//! on bool, which the reference model and Vela reject. As in rc4, the rewrite
+//! makes it an eq.Tensor whose second operand is a bool `full`, so
 //! IrDecomposeBoolEquality (rc4's DecomposeBoolEqualityPass, `:672`) splits it
 //! into LOGICAL_XOR and LOGICAL_NOT. IrMatchArgRanks rank-matches the `full`
 //! first, and IrMaterializeConstants folds it into a constant, as rc4's
 //! MatchArgRanks (`:664`) and ComputeConstantOpsAOT and FuseConstantArgs
 //! (`:699-700`) do. The quantized flow already arrives this way, because
 //! rc4's quantizer runs the same rewrite while it annotates.
+//!
+//! GREATER and GREATER_EQUAL take no bool inputs either, but rc4 has no
+//! rewrite for a bool gt, ge, lt or le (stock fails on one in
+//! ExirToTosaPass), so this pass has none.
 //!
 //! The bool rewrite fills the `full` with `float(s)`, as rc4 does, so any
 //! nonzero scalar fills it with true: `x == 2` lowers as `x == True`, where
