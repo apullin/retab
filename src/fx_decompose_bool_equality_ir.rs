@@ -16,14 +16,12 @@
 //! still reaches this pass, and the ne becomes
 //! `logical_not(logical_not(logical_xor(a, b)))`, as in rc4.
 //!
-//! RETAB's folds differ from rc4's here. rc4's FuseConstantArgs (`:700`)
-//! folds the `logical_xor` and `logical_not` of an eq between two constants.
-//! RETAB's fold planner, IrFuseConstantInputsEffectPass (which runs just
-//! after this pass and inside IrMaterializeConstants), folds comparisons but
-//! not logical ops. So a bool eq of two constants, which RETAB folded before
-//! this port, now lowers as LOGICAL_XOR and LOGICAL_NOT on two CONSTs: valid,
-//! but not folded. Only a graph lowered without the quantizer can show this;
-//! the quantized flow folds such an eq before RETAB sees it.
+//! rc4's FuseConstantArgs (`:700`) folds the `logical_xor` and `logical_not`
+//! of an eq between two constants into one constant. So does RETAB's fold
+//! planner, IrFuseConstantInputsEffectPass, which runs just after this pass
+//! and inside IrMaterializeConstants: it folds logical ops as well as
+//! comparisons. Only a graph lowered without the quantizer can bring such an
+//! eq; the quantized flow folds it before RETAB sees it.
 //!
 //! The port builds its nodes as rc4's `call_operator(op, args, {}, meta,
 //! updated=True)` does ([`meta::call_operator`]):

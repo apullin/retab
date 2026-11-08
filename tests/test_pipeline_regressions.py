@@ -308,6 +308,39 @@ def test_bool_ne_scalar_lowers_as_logical_xor_then_two_nots_tosa_INT():
     assert _main_ops(graph) == [Op.Op.LOGICAL_XOR, Op.Op.LOGICAL_NOT, Op.Op.LOGICAL_NOT]
 
 
+class BoolEqualityOfConstants(torch.nn.Module):
+    """`logical_and(value, lhs == rhs)` with rc4's test_eq.py `eq_bool` operands as
+    bool buffers."""
+
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("lhs", torch.tensor([[True], [False], [True]]))
+        self.register_buffer("rhs", torch.tensor([[True, False, True]]))
+
+    def forward(self, value):
+        return torch.logical_and(value, self.lhs == self.rhs)
+
+
+def test_bool_eq_of_constants_folds_to_one_constant_tosa_INT():
+    """rc4's FuseConstantArgs (APM:700) folds the LOGICAL_XOR and LOGICAL_NOT that a
+    bool eq of two constants becomes, and so does RETAB's constant planner (APU-123)."""
+    graph = _lower_and_compare(BoolEqualityOfConstants(), (_bool_input((3, 3)),))
+    assert _main_ops(graph) == [Op.Op.LOGICAL_AND]
+    block = graph.Regions(0).Blocks(0)
+    tensors = {
+        block.Tensors(i).Name(): block.Tensors(i) for i in range(block.TensorsLength())
+    }
+    (logical_and,) = (
+        block.Operators(i)
+        for i in range(block.OperatorsLength())
+        if block.Operators(i).Op() == Op.Op.LOGICAL_AND
+    )
+    inputs = [tensors[logical_and.Inputs(i)] for i in range(logical_and.InputsLength())]
+    (constant,) = (tensor for tensor in inputs if tensor.DataLength() > 0)
+    assert constant.Type() == DType.DType.BOOL
+    assert constant.DataAsNumpy().tolist() == [1, 0, 1, 0, 1, 0, 1, 0, 1]
+
+
 class NegativePad(torch.nn.Module):
     def __init__(self, constant_pad_nd):
         super().__init__()
