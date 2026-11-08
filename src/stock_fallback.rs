@@ -41,8 +41,12 @@ pub fn take() -> Option<String> {
 /// sent the graph to stock, while the panic is a bug to fix.
 ///
 /// `AssertUnwindSafe` holds because the entry points only read the Python objects they
-/// get. What a panic can leave half done is RETAB's per-run state: the pending request,
-/// taken here, and the stashed IR, which the caller drops.
+/// get. What a panic can leave half done is RETAB's thread-local per-run state: the
+/// pending request, taken here; the stashed IR, which the caller drops; the U55 probe,
+/// which `with_transpose_probe` restores on unwind; the serializer's shape and dtype
+/// caches, which each serialization clears first; and the unused inputs, which only a
+/// finished serialization writes. New per-run state needs the same care: a reset at the
+/// start of its run, or a guard that restores it on unwind.
 pub fn catch_panic<R>(body: impl FnOnce() -> R) -> Result<R, String> {
     install_panic_hook();
     PANIC_LOCATION.with(|slot| slot.borrow_mut().take());
