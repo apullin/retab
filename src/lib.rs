@@ -217,6 +217,47 @@ fn take_stashed_hierarchy() -> StashedPipelineHierarchy {
     STASHED_IR.with(|s| std::mem::take(&mut *s.borrow_mut()))
 }
 
+/// Run `body`, the work of the Python entry point `name`. A panic in it is a RETAB bug,
+/// and stock can still lower the graph, so it becomes a `RETAB_STOCK_FALLBACK: Rust
+/// panic: ...` error. With `RETAB_DEBUG` set the panic propagates instead, as PyO3's
+/// `PanicException`.
+fn entry_point<T>(name: &str, body: impl FnOnce() -> PyResult<T>) -> PyResult<T> {
+    catch_entry_point_panic(name, crate::config::retab_debug_enabled(), body).unwrap_or_else(
+        |reason| {
+            Err(PyRuntimeError::new_err(format!(
+                "RETAB_STOCK_FALLBACK: {reason}"
+            )))
+        },
+    )
+}
+
+/// [`entry_point`] without Python: `Err` carries the fallback reason of a panic in
+/// `body` (`stock_fallback::catch_panic`), after dropping the stash, which a panic in a
+/// region pipeline leaves half built. `retab_debug` lets the panic propagate.
+/// `RETAB_TEST_PANIC=<name>` makes the entry point panic, for tests.
+fn catch_entry_point_panic<R>(
+    name: &str,
+    retab_debug: bool,
+    body: impl FnOnce() -> R,
+) -> Result<R, String> {
+    let body = || {
+        if crate::config::test_panic_entry_point().as_deref() == Some(name) {
+            panic!("RETAB_TEST_PANIC={name}");
+        }
+        body()
+    };
+    if retab_debug {
+        return Ok(body());
+    }
+    stock_fallback::catch_panic(body).inspect_err(|_| {
+        STASHED_IR.with(|stash| {
+            if let Ok(mut stash) = stash.try_borrow_mut() {
+                *stash = StashedPipelineHierarchy::default();
+            }
+        });
+    })
+}
+
 /// Fail with a `RETAB_STOCK_FALLBACK:` error (the Python seam then calls stock) when
 /// someone called `stock_fallback::request` since the last check.
 fn fail_on_stock_fallback_request() -> PyResult<()> {
@@ -400,23 +441,25 @@ fn run_fx_passes(
     pipeline_config: &Bound<'_, PyDict>,
     u55_transpose_probe: Option<Py<PyAny>>,
 ) -> PyResult<bool> {
-    let pipeline_config = pipeline_config::PipelineConfig::from_py(pipeline_config)?;
-    let probe_error = std::rc::Rc::new(std::cell::RefCell::new(None));
-    let probe = u55_transpose_probe
-        .map(|callable| python_transpose_probe(callable, std::rc::Rc::clone(&probe_error)));
-    let lowered = fx_decompose_permute_for_u55_ir::with_transpose_probe(probe, || {
-        run_full_fx_pipeline(
-            graph_module,
-            clone_bound_pyobject(exported_program),
-            &pipeline_config,
-        )
-    });
-    if let Some(err) = probe_error.take() {
-        return Err(err);
-    }
-    let (modified, ir, effects) = lowered?;
-    stash_ir(ir.map(|g| (g, effects)), pipeline_config);
-    Ok(modified)
+    entry_point("run_fx_passes", || {
+        let pipeline_config = pipeline_config::PipelineConfig::from_py(pipeline_config)?;
+        let probe_error = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let probe = u55_transpose_probe
+            .map(|callable| python_transpose_probe(callable, std::rc::Rc::clone(&probe_error)));
+        let lowered = fx_decompose_permute_for_u55_ir::with_transpose_probe(probe, || {
+            run_full_fx_pipeline(
+                graph_module,
+                clone_bound_pyobject(exported_program),
+                &pipeline_config,
+            )
+        });
+        if let Some(err) = probe_error.take() {
+            return Err(err);
+        }
+        let (modified, ir, effects) = lowered?;
+        stash_ir(ir.map(|g| (g, effects)), pipeline_config);
+        Ok(modified)
+    })
 }
 
 /// Run a control-flow region's pipeline `steps` over `ir`, as `fx_ir::run_ir_pipeline`
@@ -477,13 +520,15 @@ fn run_fx_submodule_passes(
     region_name: Option<String>,
     pipeline_config: &Bound<'_, PyDict>,
 ) -> PyResult<bool> {
-    run_region_passes(
-        graph_module,
-        exported_program,
-        region_name,
-        pipeline_config,
-        fx_pipeline::build_ir_while_submodule_pipeline,
-    )
+    entry_point("run_fx_submodule_passes", || {
+        run_region_passes(
+            graph_module,
+            exported_program,
+            region_name,
+            pipeline_config,
+            fx_pipeline::build_ir_while_submodule_pipeline,
+        )
+    })
 }
 
 /// Run the cond branch submodule IR pipeline and stash the resulting IrGraph.
@@ -495,27 +540,33 @@ fn run_fx_cond_passes(
     region_name: Option<String>,
     pipeline_config: &Bound<'_, PyDict>,
 ) -> PyResult<bool> {
-    run_region_passes(
-        graph_module,
-        exported_program,
-        region_name,
-        pipeline_config,
-        fx_pipeline::build_ir_cond_submodule_pipeline,
-    )
+    entry_point("run_fx_cond_passes", || {
+        run_region_passes(
+            graph_module,
+            exported_program,
+            region_name,
+            pipeline_config,
+            fx_pipeline::build_ir_cond_submodule_pipeline,
+        )
+    })
 }
 
 /// Runtime inputs of the last serialized main graph that no op consumes. Ethos-U
 /// binds delegate arguments by position after Vela drops unused inputs, so its
 /// backend must reject these.
 #[pyfunction]
-fn last_unused_inputs() -> Vec<String> {
-    LAST_UNUSED_INPUTS.with(|slot| slot.borrow().clone())
+fn last_unused_inputs() -> PyResult<Vec<String>> {
+    entry_point("last_unused_inputs", || {
+        Ok(LAST_UNUSED_INPUTS.with(|slot| slot.borrow().clone()))
+    })
 }
 
 /// Serialize the IR hierarchy stashed by the `run_fx_*` entry points to a TOSA flatbuffer.
 #[pyfunction]
 fn ingest_and_serialize(py: Python<'_>) -> PyResult<Py<PyBytes>> {
-    ingest_and_serialize_tosa_pybytes(py)
+    entry_point("ingest_and_serialize", || {
+        ingest_and_serialize_tosa_pybytes(py)
+    })
 }
 
 #[pymodule]
@@ -551,6 +602,46 @@ mod tests {
             assert!(stashed.submodules.contains_key("true_graph"));
             assert_eq!(stashed.pipeline_config, Some(config));
         }
+    }
+
+    /// A panic in an entry point becomes its fallback reason and drops the stash, which
+    /// a panic in a region pipeline leaves half built, so no later `ingest_and_serialize`
+    /// can serialize it. An error that isn't a panic passes through and keeps the stash,
+    /// and with RETAB_DEBUG the panic propagates.
+    #[test]
+    fn a_panicking_entry_point_drops_the_stash() {
+        let lowered = || {
+            (
+                fx_ir::IrGraph::empty(),
+                lowering_effects::LoweringEffectBatch::default(),
+            )
+        };
+        stash_ir(
+            Some(lowered()),
+            PipelineConfig::from_tosa_spec("TOSA-1.0+INT+cf"),
+        );
+        let failed = catch_entry_point_panic("run_fx_cond_passes", false, || Err::<u8, _>("no"));
+        assert_eq!(failed, Ok(Err("no")));
+        assert!(STASHED_IR.with(|stash| stash.borrow().parent.is_some()));
+
+        let panicked = catch_entry_point_panic("run_fx_cond_passes", false, || -> u8 {
+            stash_submodule_ir(Some("true_graph".to_owned()), Some(lowered()));
+            panic!("boom")
+        });
+        let reason = panicked.unwrap_err();
+        assert!(
+            reason.starts_with("Rust panic: boom (at src/lib.rs:"),
+            "{reason}"
+        );
+        let stashed = take_stashed_hierarchy();
+        assert!(stashed.parent.is_none());
+        assert!(stashed.submodules.is_empty());
+        assert_eq!(stashed.pipeline_config, None);
+
+        let propagated = std::panic::catch_unwind(|| {
+            catch_entry_point_panic("run_fx_passes", true, || -> u8 { panic!("debug") })
+        });
+        assert!(propagated.is_err());
     }
 
     /// Critique B2: a region pipeline that changes the region's placeholders requests a

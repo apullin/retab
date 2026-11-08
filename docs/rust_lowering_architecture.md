@@ -79,6 +79,18 @@ unavailable fork start method. Counts remain local to each process.
 | `run_fx_cond_passes` | Import a cond branch, propagate parent boundary metadata, run its pipeline, and stash the named region. |
 | `run_fx_submodule_passes` | Import a while submodule, propagate boundary metadata, run its pipeline, and stash the named region. |
 | `ingest_and_serialize` | Consume the hierarchy, apply boundary contracts, convert graphs, apply effects, and return TOSA bytes. |
+| `last_unused_inputs` | Return the main graph's runtime inputs that no operator of the last serialized TOSA reads, for Python's Ethos-U check. |
+
+A pass or a check that can't lower a graph hands it to stock with a
+`RETAB_STOCK_FALLBACK: <reason>: <details>` error, which Python counts by
+reason before calling stock (`stock_fallback.rs`). Every entry point also runs
+its body under `entry_point`, which turns a panic into such an error:
+`RETAB_STOCK_FALLBACK: Rust panic: <message> (at <file>:<line>:<column>)`.
+A panic is always a RETAB bug, and stock can still lower the graph, but PyO3
+would raise it as `PanicException`, a `BaseException` that Python's fallback
+handling doesn't catch. The panic hook doesn't print a panic caught this way,
+the stash is dropped, and Python logs the fallback as a warning. `RETAB_DEBUG`
+lets the panic propagate instead.
 
 `StashedPipelineHierarchy` contains an optional parent pipeline and a
 `BTreeMap` of named submodule pipelines. `STASHED_IR` is thread-local and is
