@@ -139,7 +139,7 @@ Steps 68-86 are rc4's phase 6, in rc4's order:
 | 70 | IrRewriteConv | RewriteConvPass, :721 |
 | 71 | IrRewriteMatmulRescale | RewriteMatmulPass, :724; the serializer turns aten mm and bmm into MATMUL (rc4's ConvertMmToBmmPass, :679) |
 | 72 | IrFuseViewCopyTransform | FuseViewCopyTransformPass, :725 |
-| 73-74 | IrPropagateViewCopyPermuteDown, IrPropagateViewCopyPermuteUp | :726-727, with RemovePermutesAroundElementwiseTosaOps inside, as in rc4, except that a lower-rank constant in a region is moved into the region's layout as upstream's fix does it (#24315, as backported to release/1.6): rc4 reshapes it where a transpose is needed, which gives wrong output, or raises |
+| 73-74 | IrPropagateViewCopyPermuteDown, IrPropagateViewCopyPermuteUp | :726-727, with RemovePermutesAroundElementwiseTosaOps inside, as in rc4, except for two upstream fixes, as backported to release/1.6. A lower-rank constant in a region is moved into the region's layout as #24315 does it: rc4 reshapes it where a transpose is needed, which gives wrong output, or raises. And a region in which a node broadcasts operands of different rank keeps its permutes, as #24469's guard decides: rc4 rewrites it into a differently shaped result. The guard skips TABLE, whose rank-1 table is no broadcast operand, as the fix stacked on the guard's backport does, so a region with a TABLE in it, such as the rsqrt of a layer or RMS norm, loses its permutes as it does in rc4. As in that fix, only a TABLE's table keeps its layout: a constant data input is moved into the region's layout, which rc4, dropping every constant input of a TABLE, skips |
 | 75 | IrRewritePad | RewritePadPass, :728 |
 | 76 | IrMoveDataMovementOpsToSmallerDtype | :731 |
 | 77 | IrMatchArgRanks | MatchArgRanksPass, :732 |

@@ -1,6 +1,6 @@
 # The graphs rc4's RemovePermutesAroundElementwiseOps tests hand the pass, and what it returns.
 # Recorded by tests/fixtures/remove_permutes_upstream/record_rc4_test_calls.py; don't edit by hand.
-# executorch sources: git 52ecaaf13607cf02232cd22d42146f1d85ba664e
+# executorch sources: git c3172c002810ab32d0d5cda00d330209a9c3c3a0
 case test_constant_input_cache_refreshes_for_reused_pass#0
 before
 %0 = placeholder first_constant : torch.float32[1] kind=param q=none
@@ -108,6 +108,53 @@ after modified=true
 %3 = aten.sub.Tensor(%1, %2) : torch.float32[1, 8, 4] q=none
 output([%1, %3])
 end
+case test_remove_permutes_around_rms_norm_with_table_tosa_INT#0
+before
+%0 = placeholder x : torch.int8[1, 3, 4, 8] q=none
+%1 = placeholder b_rsqrt_table_constant : torch.int8[256] q=none
+%2 = aten.permute_copy.default(%0, [0, 3, 1, 2]) : torch.int8[1, 8, 3, 4] q=none
+%3 = tosa.RESCALE.default(%2, torch.int32, [1.0], 0, 0) : torch.int32[1, 8, 3, 4] q=none
+%4 = aten.mul.Tensor(%3, %3) : torch.int32[1, 8, 3, 4] q=none
+%5 = aten.sum.dim_IntList(%4, [1], True, dtype=torch.int32) : torch.int32[1, 1, 3, 4] q=none
+%6 = tosa.RESCALE.default(%5, torch.int8, [0.01], 0, 0) : torch.int8[1, 1, 3, 4] q=none
+%7 = tosa.TABLE.default(%6, %1) : torch.int8[1, 1, 3, 4] q=none
+%8 = tosa.RESCALE.default(%7, torch.int32, [1.0], 0, 0) : torch.int32[1, 1, 3, 4] q=none
+%9 = aten.mul.Tensor(%3, %8) : torch.int32[1, 8, 3, 4] q=none
+%10 = tosa.RESCALE.default(%9, torch.int8, [0.01], 0, 0) : torch.int8[1, 8, 3, 4] q=none
+%11 = aten.permute_copy.default(%10, [0, 2, 3, 1]) : torch.int8[1, 3, 4, 8] q=none
+output(%11)
+after modified=true
+%0 = placeholder x : torch.int8[1, 3, 4, 8] q=none
+%1 = placeholder b_rsqrt_table_constant : torch.int8[256] q=none
+%2 = tosa.RESCALE.default(%0, torch.int32, [1.0], 0, 0) : torch.int32[1, 3, 4, 8] q=none
+%3 = aten.mul.Tensor(%2, %2) : torch.int32[1, 3, 4, 8] q=none
+%4 = aten.sum.dim_IntList(%3, [3], True, dtype=torch.int32) : torch.int32[1, 3, 4, 1] q=none
+%5 = tosa.RESCALE.default(%4, torch.int8, [0.01], 0, 0) : torch.int8[1, 3, 4, 1] q=none
+%6 = tosa.TABLE.default(%5, %1) : torch.int8[1, 3, 4, 1] q=none
+%7 = tosa.RESCALE.default(%6, torch.int32, [1.0], 0, 0) : torch.int32[1, 3, 4, 1] q=none
+%8 = aten.mul.Tensor(%2, %7) : torch.int32[1, 3, 4, 8] q=none
+%9 = tosa.RESCALE.default(%8, torch.int8, [0.01], 0, 0) : torch.int8[1, 3, 4, 8] q=none
+output(%9)
+end
+case test_remove_permutes_around_table_with_constant_input_tosa_INT#0
+before
+%0 = placeholder x : torch.int8[1, 3, 4, 8] q=none
+%1 = placeholder b_state : torch.int8[1, 8, 3, 4] q=none
+%2 = placeholder b_sigmoid_table_constant : torch.int8[256] q=none
+%3 = aten.permute_copy.default(%0, [0, 3, 1, 2]) : torch.int8[1, 8, 3, 4] q=none
+%4 = tosa.TABLE.default(%1, %2) : torch.int8[1, 8, 3, 4] q=none
+%5 = aten.mul.Tensor(%3, %4) : torch.int8[1, 8, 3, 4] q=none
+%6 = aten.permute_copy.default(%5, [0, 2, 3, 1]) : torch.int8[1, 3, 4, 8] q=none
+output(%6)
+after modified=true
+%0 = placeholder x : torch.int8[1, 3, 4, 8] q=none
+%1 = placeholder b_state : torch.int8[1, 8, 3, 4] q=none
+%2 = aten.permute_copy.default(%1, [0, 2, 3, 1]) : torch.int8[1, 3, 4, 8] q=none
+%3 = placeholder b_sigmoid_table_constant : torch.int8[256] q=none
+%4 = tosa.TABLE.default(%2, %3) : torch.int8[1, 3, 4, 8] q=none
+%5 = aten.mul.Tensor(%0, %4) : torch.int8[1, 3, 4, 8] q=none
+output(%5)
+end
 case test_remove_permutes_around_gelu_with_folded_scalar_constants_tosa_FP#0
 before
 %0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
@@ -208,6 +255,21 @@ before
 output([%5])
 after modified=false same
 end
+case test_cat_with_different_concat_sizes_does_not_block_region#0
+before
+%0 = placeholder x : torch.float32[1, 4, 2, 2] q=none
+%1 = placeholder y : torch.float32[1, 6, 2, 2] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 2, 2, 4] q=none
+%3 = aten.permute_copy.default(%1, [0, 2, 3, 1]) : torch.float32[1, 2, 2, 6] q=none
+%4 = aten.cat.default([%2, %3], 3) : torch.float32[1, 2, 2, 10] q=none
+%5 = aten.permute_copy.default(%4, [0, 3, 1, 2]) : torch.float32[1, 10, 2, 2] q=none
+output([%5])
+after modified=true
+%0 = placeholder x : torch.float32[1, 4, 2, 2] q=none
+%1 = placeholder y : torch.float32[1, 6, 2, 2] q=none
+%2 = aten.cat.default([%0, %1], 1) : torch.float32[1, 10, 2, 2] q=none
+output([%2])
+end
 case test_no_fire_non_squeeze_view#0
 before
 %0 = placeholder x : torch.float32[1, 6, 8] q=none
@@ -217,6 +279,20 @@ before
 %4 = aten.permute_copy.default(%3, [0, 2, 1]) : torch.float32[1, 12, 4] q=none
 output([%4])
 after modified=false same
+end
+case test_numel_one_operand_does_not_block_region#0
+before
+%0 = placeholder x : torch.float32[1, 4, 2, 3] q=none
+%1 = placeholder scale : torch.float32[] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 2, 3, 4] q=none
+%3 = aten.mul.Tensor(%2, %1) : torch.float32[1, 2, 3, 4] q=none
+%4 = aten.permute_copy.default(%3, [0, 3, 1, 2]) : torch.float32[1, 4, 2, 3] q=none
+output([%4])
+after modified=true
+%0 = placeholder x : torch.float32[1, 4, 2, 3] q=none
+%1 = placeholder scale : torch.float32[] q=none
+%2 = aten.mul.Tensor(%0, %1) : torch.float32[1, 4, 2, 3] q=none
+output([%2])
 end
 case test_permutation_sink_view_preserves_cat_layout#0
 before
@@ -466,6 +542,16 @@ before
 %2 = aten.mul.Tensor(%1, %1) : torch.float32[1, 16, 8] q=none
 %3 = aten.view_copy.default(%2, [1, 16, 8]) : torch.float32[1, 16, 8] q=none
 %4 = aten.permute_copy.default(%3, [0, 2, 1]) : torch.float32[1, 8, 16] q=none
+output([%4])
+after modified=false same
+end
+case test_squeezed_lower_rank_operand_blocks_region#0
+before
+%0 = placeholder x : torch.float32[1, 4, 4, 1] q=none
+%1 = aten.permute_copy.default(%0, [0, 3, 1, 2]) : torch.float32[1, 1, 4, 4] q=none
+%2 = aten.view_copy.default(%1, [4, 4]) : torch.float32[4, 4] q=none
+%3 = aten.add.Tensor(%1, %2) : torch.float32[1, 1, 4, 4] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 3, 1]) : torch.float32[1, 4, 4, 1] q=none
 output([%4])
 after modified=false same
 end

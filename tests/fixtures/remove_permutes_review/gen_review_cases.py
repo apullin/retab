@@ -10,8 +10,9 @@ through the replay generator's `run_case` (same pass construction and edge-set
 pinning as tests/fixtures/layout_replay/gen_layout_replay.py) and is written in
 the replay format to remove_permutes_review.txt next to this script. Like
 the remove-permutes replay fixtures, the cases record rc4 with the release/1.6
-backport of #24315, so generate them the same way (see the replay generator's
-docstring):
+backports of #24315 and of #24469's mixed-rank broadcast guard, and the
+guard's TABLE exemption, so generate them the same way (see the replay
+generator's docstring):
 
     cd /tmp && PYTHONPATH=<checkout>/src <venv>/bin/python -P <retab>/tests/fixtures/remove_permutes_review/gen_review_cases.py
 """

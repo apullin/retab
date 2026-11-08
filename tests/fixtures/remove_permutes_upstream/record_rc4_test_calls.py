@@ -16,8 +16,9 @@ replay fixture does). The TOSA subclass's graph-signature constants are marked
 with the val fake execution gives them, which does not change what the pass
 does there.
 
-The source tree is rc4 with the release/1.6 backport of #24315, which adds a
-test and the fix RETAB's port follows (see
+The source tree is rc4 with the release/1.6 backports of #24315 and of
+#24469's mixed-rank broadcast guard, and the guard's TABLE exemption, which
+add six tests and the fixes RETAB's port follows (see
 tests/fixtures/layout_replay/gen_layout_replay.py's docstring). The pass must
 come from the tree whose tests run, so put its `src` on PYTHONPATH. Usage,
 with the rc4 environment:

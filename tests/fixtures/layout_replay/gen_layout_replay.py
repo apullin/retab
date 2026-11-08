@@ -10,17 +10,30 @@ checkout can't shadow the installed package:
 
     cd /tmp && <venv>/bin/python -P <retab>/tests/fixtures/layout_replay/gen_layout_replay.py
 
-Except for the remove-permutes fixtures (`remove_permutes_around_elementwise`
-and `remove_permutes_user_order`): RETAB compensates lower-rank constants as
-upstream's fix does (#24315; rc4 reshapes them where a transpose is needed, or
-raises), so these record rc4 with that fix, as backported to release/1.6
-(52ecaaf136, branch retab/pick-1.6/transpose-lower-rank-constants of
-github.com/apullin/executorch). Generate them from a checkout of that commit,
-with the installed wheel's build artifacts linked into its `src/executorch`,
-ahead of the installed package:
+Except for the fixtures that run RemovePermutesAroundElementwiseTosaOps: the
+remove-permutes fixtures (`remove_permutes_around_elementwise` and
+`remove_permutes_user_order`) and the propagation fixtures that build the
+passes with the exported program, whose fusion pass it is
+(`propagate_view_copy_permute_down`, `_up` and `_down_up`). RETAB's port
+follows two upstream fixes rc4 lacks: it compensates lower-rank constants as
+#24315 does (rc4 reshapes them where a transpose is needed, or raises), and it
+keeps the permutes of a region in which a node broadcasts operands of
+different rank, as #24469's guard does (rc4 rewrites it into a differently
+shaped result), except where the node is a TABLE, which never broadcasts its
+lookup table. So these record rc4 with those fixes, as backported to
+release/1.6: c3172c0028, branch retab/pick-1.6/guard-table-exemption of
+github.com/apullin/executorch, which exempts TABLE from the guard of
+8c5df6f460 (branch retab/pick-1.6/mixed-rank-broadcast-guard), itself stacked
+on the #24315 backport (52ecaaf136), and which keeps only a TABLE's table out
+of the constant edges, where rc4 drops every constant input of a TABLE.
+Generate them from a checkout of that commit, with the installed wheel's
+build artifacts linked into its `src/executorch`, ahead of the installed
+package:
 
     cd /tmp && PYTHONPATH=<checkout>/src <venv>/bin/python -P <retab>/tests/fixtures/layout_replay/gen_layout_replay.py \
-        --pass remove_permutes_around_elementwise --pass remove_permutes_user_order
+        --pass remove_permutes_around_elementwise --pass remove_permutes_user_order \
+        --pass propagate_view_copy_permute_down --pass propagate_view_copy_permute_up \
+        --pass propagate_view_copy_permute_down_up
 
 A fixture generated from a checkout says so in its header: its regenerate line
 is the command above for that fixture alone, `executorch sources:` names the

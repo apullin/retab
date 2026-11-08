@@ -18,8 +18,11 @@ const REVIEW_FIXTURE: &str =
 const NONE_DIM_CASE: &str = "sum_with_dim_none_keepdim";
 
 /// The review cases (tests/fixtures/remove_permutes_review, recorded like the
-/// replay fixtures from rc4 with the release/1.6 backport of #24315) match,
-/// except the `None` reduction dim that RETAB's importer cannot tell from `[]`.
+/// replay fixtures from rc4 with the release/1.6 backports of #24315 and of
+/// #24469's guard, and the guard's TABLE exemption) match, except the `None`
+/// reduction dim that RETAB's importer cannot tell from `[]`. They hold no
+/// quantized op, so no pending table, and replay as the pipeline runs the
+/// pass.
 #[test]
 fn review_cases_match_rc4() {
     replay::check_known(
