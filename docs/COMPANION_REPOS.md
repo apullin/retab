@@ -53,8 +53,8 @@ package; do not infer one from the other.
 
 ## Environment setup
 
-The [README quick start](../README.md#quick-start) creates an environment with
-uv and installs the tested stack from PyPI. That explicit install is the
+The [README install steps](../README.md#install) create an environment with
+uv and install the tested stack from PyPI. That explicit install is the
 supported setup: RETAB ships no installer script for the stack, and its build
 helpers need an existing environment and never create one. RETAB only needs an
 importable `executorch.backends.arm`, so an ExecuTorch built from a source
