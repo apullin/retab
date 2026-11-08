@@ -122,10 +122,12 @@ fn has_input_qparams(node: &IrNode) -> bool {
         .is_some_and(|qparams| !qparams.is_empty())
 }
 
-/// A data-movement copy: its value holds its first input's elements, so they
-/// keep that input's quantization (permutes, views and other rank changes,
-/// slices, clones). The same set as IrRewriteConv's hazard walk.
-fn copies_its_input(node: &IrNode) -> bool {
+/// A data-movement copy: its value holds its first input's elements unchanged,
+/// so they keep that input's quantization. These are permutes, views and other
+/// rank changes, slices, and clones. IrRewriteConv's hazard walk
+/// (`control_flow_output_read` in `layout::rewrite_conv`) follows the same
+/// copies.
+pub(crate) fn copies_its_input(node: &IrNode) -> bool {
     let target = node.target.as_str();
     node.op == NodeOp::CallFunction
         && (is_layout_passthrough_target(target)

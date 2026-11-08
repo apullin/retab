@@ -153,11 +153,9 @@ use crate::fx_ir::{
     QParamMap,
 };
 use crate::fx_meta::TensorFacts;
-use crate::fx_target::{
-    is_layout_passthrough_target, is_slice_tensor_target, noop_target, NoopTarget,
-};
 use crate::graph::ir::DType;
 use crate::layout::constants::{constant_kind, is_constant};
+use crate::layout::control_flow_guard::copies_its_input;
 use crate::layout::ctx::{GraphScope, InsertPoint, LayoutCtx, NodeOrder};
 use crate::layout::dtype::{
     conv_output_dtype, is_quantized_conv, set_special_dtype, value_dtype, SpecialDtype,
@@ -654,17 +652,6 @@ fn control_flow_output_read(graph: &IrGraph, input: NodeId) -> Option<(NodeId, V
         current = node.first_node_arg()?;
     }
     None
-}
-
-/// A data-movement copy: its value holds its first input's elements unchanged,
-/// so they keep that input's quantization. These are permutes, views and other
-/// rank changes, slices, and clones.
-fn copies_its_input(node: &IrNode) -> bool {
-    let target = node.target.as_str();
-    node.op == NodeOp::CallFunction
-        && (is_layout_passthrough_target(target)
-            || is_slice_tensor_target(target)
-            || noop_target(target) == Some(NoopTarget::PassthroughFirstArg))
 }
 
 /// The conv's weight, as RCP finds it (`_rewrite_weight`, RCP:328-378).
