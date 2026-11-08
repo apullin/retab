@@ -97,7 +97,6 @@ away from their rc4 slot ([Order differences](#order-differences-before-phase-6)
 | 45 | IrQuantizeClampArgs | QuantizeClampArgumentsPass, :604 | Moved. |
 | 46 | IrConvertFullLike | ConvertFullLikeToFullPass, :661 | |
 | 47 | IrMatchArgRanks | MatchArgRanksPass, :664 | |
-| 48-50 | IrFuseZeroInputConstantsEp, IrFuseShapeOnlyConstantsEp, IrFuseConstantInputsEp (`matmul_only`) | none | RETAB-only: constant sweep 1. |
 | 51 | IrDecomposeAdaptiveAvgPool | DecomposeAdaptiveAvgPool2dPass, :647 | Moved. |
 | 52 | IrDecomposeAvgPoolPad | DecomposeAvgPool2dPass, :649 | Moved. |
 | 53 | IrNormalizeMaxPool2dInputRank | NormalizeMaxPool2dInputRankPass, :692 | |
@@ -249,17 +248,16 @@ crossing a phase boundary.
 |---|---|---:|---|
 | IrRecordControlFlowRescaleTargets (9) | RETAB inserts cond and while boundary RESCALEs at serialization, where rc4 inserts them at :595. This step records each output's target qparams from the quantize after its getitem, before IrFoldQdq folds that quantize. | n/a | Keep. It writes metadata only, so it never reports a change; any graph with a cond or while needs it. |
 | IrReplaceInfAndLimitValues (22) | Replaces ±inf and float32 limits in literal arguments, which rc4 does only on the quantizer side (:881). | 0 | Duplicates RETAB's input contract. Remove with a gate. |
-| Constant sweep 1 (48-50) | RETAB's older constant folding. It records MaterializeTensorNode effects, which ingest applies by node name. | 102 | Probably redundant. IrMaterializeConstants (64) re-plans with the same planners and gives each node it folds a new name, which voids the sweep's effect for that node. The sweep fired on 102 sampled graphs and step 64 on 106. An A/B settles it: skip the sweep, then byte-compare the corpus and the op suite. |
 | IrLegalizeIntegerArithmetic (58) | TOSA's integer ADD, SUB and REDUCE_SUM take int32 operands. The step casts raw (unquantized) int8 or int16 operands of add, sub and sum to int32, and the result back. rc4's InsertRescaleInt32Pass handles only quantized operands. | 2 | Keep. It fired only on test_to_copy's two REDUNDANT_CAST cases, raw int8 and int16 adds that stock fails to lower; rc4 marks them as expected failures (APU-77). |
 | IrFuseCascadedViews (66) | Fuses view chains and keeps the last view, where rc4's FuseViewCopyTransform (:725, :744) keeps the first. | 25 | Keep. APU-161 measured it: skipping it renamed tensors in 6 of 27 corpus delegates. It fired on 29 of 1,169 view-related op tests, and skipping it changed 28 of their dumps, 13 of them in op order, without getting closer to stock. |
-| Constant sweeps 2 and 3 (71-72, 93-95) | The sweep-1 planners again, after IrMaterializeConstants and after phase 6. | 0 | Remove with a gate. |
+| Constant sweeps 2 and 3 (71-72, 93-95) | RETAB's older constant folding, as was constant sweep 1 ([Removed steps](#removed-steps)): they record MaterializeTensorNode effects, which ingest applies by node name, after IrMaterializeConstants and after phase 6. | 0 | Remove with a gate. |
 | IrControlFlowOutputGuard (99) | Sends the graph to stock when layout copies hide a control-flow output's boundary target and step 9 recorded none. | n/a | Keep as a guard. It never changes the graph, and it requested no stock fallback in the sample. |
 | IrStripWhileBoundaryQ (while regions) | See [Regions](#regions). | 14 | Keep. |
 
 So five RETAB-only steps could never fire on the graphs stock's edge pipeline
-produces, and they are removed ([Removed steps](#removed-steps)). Three more
-fired on no sampled graph: IrReplaceInfAndLimitValues and constant sweeps 2
-and 3.
+produces, and they are removed ([Removed steps](#removed-steps)), as is
+constant sweep 1, which fired but changed no output. Three more fired on no
+sampled graph: IrReplaceInfAndLimitValues and constant sweeps 2 and 3.
 
 ### Removed steps
 
@@ -282,12 +280,28 @@ the same table. Should one of these ops reach RETAB anyway, as a custom
 partition op for instance, the serializer stops with "RETAB has no TOSA
 emitter"; rc4 has no backend pass or node visitor for these ops either.
 
-Removing them changed no output. The corpus delegates stayed byte-identical,
-and so did the TOSA RETAB produced for each tosa_INT test of the op-test files
-that build these ops (test_select_scatter, test_tril, test_repeat, test_var and
-test_layer_norm) and for INT runs of test_pixel_shuffling's modules. That file
-has no tosa_INT case: its TOSA tests use FP and mixed-precision specs, which
-RETAB leaves to stock.
+Constant sweep 1 (48-50: IrFuseZeroInputConstantsEp, IrFuseShapeOnlyConstantsEp
+and IrFuseConstantInputsEp `matmul_only`) is removed too. It did fire, on 102
+sampled graphs, but none of its effects reached the output. It recorded
+MaterializeTensorNode effects, which ingest applies by node name, and
+IrMaterializeConstants (64) runs the same planners and gives each node it folds
+a new name (`<node>_pre_computed` or `<node>_fused_const`), so ingest found no
+live node under the names the sweep recorded (P2 design F9). Sweep 2 runs the
+zero-input and shape-only planners again after step 64, and sweep 3 runs all
+three after phase 6; neither found anything to plan on any sampled graph. Step
+64 follows rc4's folding rules, so where it leaves a node alone, the sweep could
+only have folded something rc4 doesn't. The order test now pins the constant
+effect passes after IrMaterializeConstants.
+
+None of these removals changed any output. Each was checked by byte-comparing
+RETAB's TOSA before and after for the 28 corpus delegates; for the 499
+delegates, 491 of them lowered by RETAB, of the 507 tosa_INT tests in 22
+op-test files (the 20 of the [firing sample](#how-the-firing-data-was-taken)
+plus test_conv2d and test_linear); and for 10 INT runs of
+test_pixel_shuffling's modules. That file has no tosa_INT case: its TOSA tests
+use FP and mixed-precision specs, which RETAB leaves to stock. Everything stayed
+byte-identical, first for the five steps in the table and then for constant
+sweep 1 on top of them.
 
 ## rc4 steps RETAB has no step for
 

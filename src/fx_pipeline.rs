@@ -188,15 +188,6 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         Ir(Box::new(
             crate::fx_decompose_bool_equality_ir::IrDecomposeBoolEqualityPass,
         )),
-        Effectful(Box::new(
-            crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEffectPass,
-        )),
-        Effectful(Box::new(
-            crate::fx_fuse_shape_only_constants_ir::IrFuseShapeOnlyConstantsEffectPass,
-        )),
-        Effectful(Box::new(
-            crate::fx_fuse_constant_inputs_ir::IrFuseConstantInputsEffectPass::matmul_only(),
-        )),
         Ir(Box::new(
             crate::fx_decompose_adaptive_avgpool_ir::IrDecomposeAdaptiveAvgPoolPass,
         )),
@@ -617,8 +608,14 @@ mod tests {
                 assert!(position("IrInsertTableOpsEp") < size_adjust);
                 assert_eq!(
                     count("IrFuseConstantInputsEp"),
-                    2,
-                    "{spec}: matmul_only twice"
+                    1,
+                    "{spec}: matmul_only once, after phase 6"
+                );
+                // The constant effect passes run only after IrMaterializeConstants,
+                // which folds what they would plan before it under new names.
+                assert!(
+                    position("IrMaterializeConstants") < position("IrFuseZeroInputConstantsEp"),
+                    "{spec}"
                 );
 
                 // The phase-6 block, once, after the late IrRemoveNoop.
@@ -678,8 +675,8 @@ mod tests {
     }
 
     /// A `where` whose mask has a lower rank than its operands, through the steps from
-    /// IrDecomposeStridedSlice to the constant effects after IrConvertFullLike, which
-    /// hold IrMatchArgRanks (APM:664). The pipeline only rank-matches the mask, as rc4
+    /// IrDecomposeStridedSlice up to IrDecomposeAdaptiveAvgPool, which hold
+    /// IrMatchArgRanks (APM:664). The pipeline only rank-matches the mask, as rc4
     /// does for SELECT, which broadcasts it, rather than tiling it to the output shape
     /// (APU-161).
     #[test]
@@ -715,7 +712,7 @@ mod tests {
                     .unwrap_or_else(|| panic!("{pass} missing"))
             };
             let start = position("IrDecomposeStridedSlice", 0);
-            let end = position("IrFuseZeroInputConstantsEp", start);
+            let end = position("IrDecomposeAdaptiveAvgPool", start);
             run_steps(&steps[start..end], &mut graph);
             graph
         }
@@ -790,7 +787,7 @@ mod tests {
                     .unwrap_or_else(|| panic!("{pass} missing"))
             };
             let start = position("IrDecomposeStridedSlice", 0);
-            let end = position("IrFuseZeroInputConstantsEp", start);
+            let end = position("IrDecomposeAdaptiveAvgPool", start);
             run_steps(&steps[start..end], &mut graph);
 
             assert!(!graph
