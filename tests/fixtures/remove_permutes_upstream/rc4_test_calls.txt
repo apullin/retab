@@ -1,6 +1,6 @@
 # The graphs rc4's RemovePermutesAroundElementwiseOps tests hand the pass, and what it returns.
 # Recorded by tests/fixtures/remove_permutes_upstream/record_rc4_test_calls.py; don't edit by hand.
-# executorch sources: git 52ecaaf13607cf02232cd22d42146f1d85ba664e
+# executorch sources: git 8c5df6f460bb904f10b91a1e596dde465aa904d3
 case test_constant_input_cache_refreshes_for_reused_pass#0
 before
 %0 = placeholder first_constant : torch.float32[1] kind=param q=none
@@ -208,6 +208,21 @@ before
 output([%5])
 after modified=false same
 end
+case test_cat_with_different_concat_sizes_does_not_block_region#0
+before
+%0 = placeholder x : torch.float32[1, 4, 2, 2] q=none
+%1 = placeholder y : torch.float32[1, 6, 2, 2] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 2, 2, 4] q=none
+%3 = aten.permute_copy.default(%1, [0, 2, 3, 1]) : torch.float32[1, 2, 2, 6] q=none
+%4 = aten.cat.default([%2, %3], 3) : torch.float32[1, 2, 2, 10] q=none
+%5 = aten.permute_copy.default(%4, [0, 3, 1, 2]) : torch.float32[1, 10, 2, 2] q=none
+output([%5])
+after modified=true
+%0 = placeholder x : torch.float32[1, 4, 2, 2] q=none
+%1 = placeholder y : torch.float32[1, 6, 2, 2] q=none
+%2 = aten.cat.default([%0, %1], 1) : torch.float32[1, 10, 2, 2] q=none
+output([%2])
+end
 case test_no_fire_non_squeeze_view#0
 before
 %0 = placeholder x : torch.float32[1, 6, 8] q=none
@@ -217,6 +232,20 @@ before
 %4 = aten.permute_copy.default(%3, [0, 2, 1]) : torch.float32[1, 12, 4] q=none
 output([%4])
 after modified=false same
+end
+case test_numel_one_operand_does_not_block_region#0
+before
+%0 = placeholder x : torch.float32[1, 4, 2, 3] q=none
+%1 = placeholder scale : torch.float32[] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 2, 3, 4] q=none
+%3 = aten.mul.Tensor(%2, %1) : torch.float32[1, 2, 3, 4] q=none
+%4 = aten.permute_copy.default(%3, [0, 3, 1, 2]) : torch.float32[1, 4, 2, 3] q=none
+output([%4])
+after modified=true
+%0 = placeholder x : torch.float32[1, 4, 2, 3] q=none
+%1 = placeholder scale : torch.float32[] q=none
+%2 = aten.mul.Tensor(%0, %1) : torch.float32[1, 4, 2, 3] q=none
+output([%2])
 end
 case test_permutation_sink_view_preserves_cat_layout#0
 before
@@ -466,6 +495,16 @@ before
 %2 = aten.mul.Tensor(%1, %1) : torch.float32[1, 16, 8] q=none
 %3 = aten.view_copy.default(%2, [1, 16, 8]) : torch.float32[1, 16, 8] q=none
 %4 = aten.permute_copy.default(%3, [0, 2, 1]) : torch.float32[1, 8, 16] q=none
+output([%4])
+after modified=false same
+end
+case test_squeezed_lower_rank_operand_blocks_region#0
+before
+%0 = placeholder x : torch.float32[1, 4, 4, 1] q=none
+%1 = aten.permute_copy.default(%0, [0, 3, 1, 2]) : torch.float32[1, 1, 4, 4] q=none
+%2 = aten.view_copy.default(%1, [4, 4]) : torch.float32[4, 4] q=none
+%3 = aten.add.Tensor(%1, %2) : torch.float32[1, 1, 4, 4] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 3, 1]) : torch.float32[1, 4, 4, 1] q=none
 output([%4])
 after modified=false same
 end

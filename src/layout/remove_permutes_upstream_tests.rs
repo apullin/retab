@@ -8,11 +8,16 @@
 //!   `backends/transforms/test/test_permute_optimization_passes.py`
 //!   (`RemovePermutesAcrossViewTest`, `RemovePermutesAroundRepeatInterleaveTest`,
 //!   `RemovePermutesAroundElementwiseOpsTest` and `LayoutPermuteVisibilityTest`,
-//!   44 tests), run with the base pass as rc4 constructs it there.
+//!   47 tests), run with the base pass as rc4 constructs it there.
 //!
-//! The sources are rc4 with the release/1.6 backport of #24315, which adds
-//! one of those tests, `test_lower_rank_constant_is_transposed_into_region_layout`,
-//! and the fix for lower-rank constants that the port follows. Each test
+//! The sources are rc4 with the release/1.6 backports of #24315 and of
+//! #24469's mixed-rank broadcast guard (fork branch
+//! `retab/pick-1.6/mixed-rank-broadcast-guard`, 8c5df6f460), whose fixes the
+//! port follows. They add four of those tests: #24315's
+//! `test_lower_rank_constant_is_transposed_into_region_layout`, #24469's
+//! `test_numel_one_operand_does_not_block_region` and
+//! `test_cat_with_different_concat_sizes_does_not_block_region`, and the
+//! backport's `test_squeezed_lower_rank_operand_blocks_region`. Each test
 //! replays the calls its ExecuTorch test made, recorded in
 //! tests/fixtures/remove_permutes_upstream/rc4_test_calls.txt by running the
 //! test there with the pass instrumented (see the recorder's docstring): the
@@ -485,6 +490,43 @@ fn lower_rank_constant_is_transposed_into_region_layout() {
     }
 }
 
+/// `test_numel_one_operand_does_not_block_region` and
+/// `test_cat_with_different_concat_sizes_does_not_block_region`, #24469's
+/// tests of its mixed-rank broadcast guard: a numel-1 operand broadcasts the
+/// same under any permutation, and cat never broadcasts, so neither keeps the
+/// region's permutes.
+#[test]
+fn numel_one_operands_and_cat_pass_the_mixed_rank_guard() {
+    for test in [
+        "test_numel_one_operand_does_not_block_region#0",
+        "test_cat_with_different_concat_sizes_does_not_block_region#0",
+    ] {
+        let (graph, modified) = base(test);
+        assert!(modified, "{test}");
+        assert_eq!(count(&graph, PERMUTE), 0, "{test}");
+    }
+}
+
+/// `test_squeezed_lower_rank_operand_blocks_region`, the guard's regression
+/// test in the release/1.6 backport: the add broadcasts the permuted
+/// `[1, 1, 4, 4]` against its squeeze to `[4, 4]`. Without the permutes the
+/// `[4, 4]` would line up against the last two dims of `[1, 4, 4, 1]`, and the
+/// region would return `[1, 4, 4, 4]` instead of `[1, 4, 4, 1]`, so the guard
+/// keeps them.
+#[test]
+fn squeezed_lower_rank_operand_blocks_region() {
+    let (graph, modified) = base("test_squeezed_lower_rank_operand_blocks_region#0");
+    assert!(!modified);
+    assert_eq!(count(&graph, PERMUTE), 2);
+    let output = graph.output_node().expect("an output");
+    let result = match &output.args[0] {
+        IrArg::List(results) => results[0].as_node(),
+        result => result.as_node(),
+    }
+    .expect("the output reads a node");
+    assert_eq!(graph.node_shape(result), Some(&[1, 4, 4, 1][..]));
+}
+
 /// `LayoutPermuteVisibilityTest.test_inverse_layout_copy_pair_around_elementwise_is_removed`:
 /// `channels_last.permute_copy` counts as a permute.
 #[test]
@@ -550,9 +592,12 @@ fn every_recorded_call_is_ported() {
         "test_chained_regions_absorb_into_last_permute",
         "test_permute_bypassed_by_one_region_is_kept_by_another",
         "test_lower_rank_constant_is_transposed_into_region_layout",
+        "test_numel_one_operand_does_not_block_region",
+        "test_cat_with_different_concat_sizes_does_not_block_region",
+        "test_squeezed_lower_rank_operand_blocks_region",
         "test_inverse_layout_copy_pair_around_elementwise_is_removed",
     ];
-    assert_eq!(ported.len(), 52);
+    assert_eq!(ported.len(), 55);
     for case in replay::parse(CALLS).expect("the recorded calls parse") {
         let test = case.name.split('#').next().unwrap_or_default();
         assert!(ported.contains(&test), "recorded call {} is not ported", case.name);
