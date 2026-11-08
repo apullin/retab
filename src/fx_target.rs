@@ -463,14 +463,6 @@ pub(crate) fn is_pad_target(target: &str) -> bool {
     matches!(target, "aten.pad.default" | "aten.constant_pad_nd.default")
 }
 
-pub(crate) fn is_pixel_shuffle_target(target: &str) -> bool {
-    target == "aten.pixel_shuffle.default"
-}
-
-pub(crate) fn is_pixel_unshuffle_target(target: &str) -> bool {
-    target == "aten.pixel_unshuffle.default"
-}
-
 pub(crate) fn is_squeeze_target(target: &str) -> bool {
     matches!(
         target,
@@ -590,10 +582,6 @@ pub(crate) fn scalar_shift_replacement_target(target: &str) -> Option<&'static s
     }
 }
 
-pub(crate) fn is_repeat_interleave_self_int_target(target: &str) -> bool {
-    target == "aten.repeat_interleave.self_int"
-}
-
 pub(crate) fn is_max_pool2d_target(target: &str) -> bool {
     matches!(
         target,
@@ -652,8 +640,6 @@ mod tests {
             is_adaptive_avg_pool2d_target,
             is_as_strided_copy_target,
             is_pad_target,
-            is_pixel_shuffle_target,
-            is_pixel_unshuffle_target,
             is_squeeze_target,
             is_unsqueeze_target,
             is_dim_transpose_target,
@@ -673,7 +659,6 @@ mod tests {
             is_mean_target,
             is_full_like_target,
             is_batch_norm_target,
-            is_repeat_interleave_self_int_target,
             is_max_pool2d_target,
             is_max_pool2d_with_indices_target,
         ];
@@ -1087,9 +1072,6 @@ mod tests {
             is_pad_target,
             &["aten.pad.default", "aten.constant_pad_nd.default"],
         );
-        assert!(is_pixel_shuffle_target("aten.pixel_shuffle.default"));
-        assert_false(is_pixel_shuffle_target, &["aten.pixel_unshuffle.default"]);
-        assert!(is_pixel_unshuffle_target("aten.pixel_unshuffle.default"));
         assert_true(is_squeeze_target, &["aten.squeeze.dim"]);
         assert_true(is_unsqueeze_target, &["aten.unsqueeze.default"]);
         assert_true(is_dim_transpose_target, &["aten.transpose.int"]);
@@ -1162,10 +1144,6 @@ mod tests {
                     Some("aten.bitwise_right_shift.Tensor"),
                 ),
             ],
-        );
-        assert_true(
-            is_repeat_interleave_self_int_target,
-            &["aten.repeat_interleave.self_int"],
         );
         assert_true(is_max_pool2d_target, &["aten.max_pool2d.default"]);
         assert_true(

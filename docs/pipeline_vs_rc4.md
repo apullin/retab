@@ -93,8 +93,6 @@ away from their rc4 slot ([Order differences](#order-differences-before-phase-6)
 | 39 | IrDecomposeDivTensorMode | DecomposeDivTensorModePass, :678 | Moved. |
 | 40 | IrDecomposeAddmm | DecomposeAddmmPass, :621 | Moved. |
 | 41 | IrDecomposeCumsum | DecomposeCumsumPass, :689 | Moved. |
-| 42 | IrDecomposeRepeatInterleave | none | RETAB-only. |
-| 43 | IrDecomposePixelShuffle | none | RETAB-only. |
 | 44 | IrDecomposeAsStridedCopy | DecomposeAsStridedCopyPass, :690 | Moved. |
 | 45 | IrQuantizeClampArgs | QuantizeClampArgumentsPass, :604 | Moved. |
 | 46 | IrConvertFullLike | ConvertFullLikeToFullPass, :661 | |
@@ -252,7 +250,6 @@ crossing a phase boundary.
 |---|---|---:|---|
 | IrRecordControlFlowRescaleTargets (9) | RETAB inserts cond and while boundary RESCALEs at serialization, where rc4 inserts them at :595. This step records each output's target qparams from the quantize after its getitem, before IrFoldQdq folds that quantize. | n/a | Keep. It writes metadata only, so it never reports a change; any graph with a cond or while needs it. |
 | IrReplaceInfAndLimitValues (22) | Replaces ±inf and float32 limits in literal arguments, which rc4 does only on the quantizer side (:881). | 0 | Duplicates RETAB's input contract. Remove with a gate. |
-| IrDecomposeRepeatInterleave (42), IrDecomposePixelShuffle (43) | Decompose repeat_interleave, pixel_shuffle and pixel_unshuffle; rc4 has no such pass. | 0 | Can't fire, for the same reason: the edge table removes repeat_interleave.self_int, pixel_shuffle and pixel_unshuffle. Remove with a gate. |
 | Constant sweep 1 (48-50) | RETAB's older constant folding. It records MaterializeTensorNode effects, which ingest applies by node name. | 102 | Probably redundant. IrMaterializeConstants (64) re-plans with the same planners and gives each node it folds a new name, which voids the sweep's effect for that node. The sweep fired on 102 sampled graphs and step 64 on 106. An A/B settles it: skip the sweep, then byte-compare the corpus and the op suite. |
 | IrDecomposeVar, second (55) | A second pass over var nodes, left from RETAB's older order. | 0 | Can't fire. IrDecomposeLayerNorm (7) is the only step that creates var nodes, and the first IrDecomposeVar (8) follows it. A var the first leaves has no input shape, and nothing in between gives it one. Remove with a gate. |
 | IrLegalizeIntegerArithmetic (58) | TOSA's integer ADD, SUB and REDUCE_SUM take int32 operands. The step casts raw (unquantized) int8 or int16 operands of add, sub and sum to int32, and the result back. rc4's InsertRescaleInt32Pass handles only quantized operands. | 2 | Keep. It fired only on test_to_copy's two REDUNDANT_CAST cases, raw int8 and int16 adds that stock fails to lower; rc4 marks them as expected failures (APU-77). |
@@ -262,10 +259,8 @@ crossing a phase boundary.
 | IrStripWhileBoundaryQ (while regions) | See [Regions](#regions). | 14 | Keep. |
 
 So five RETAB-only steps could never fire on the graphs stock's edge pipeline
-produces. IrDecomposeSelectScatter and IrDecomposeTril are removed
-([Removed steps](#removed-steps)); the other three are
-IrDecomposeRepeatInterleave, IrDecomposePixelShuffle and the second
-IrDecomposeVar. Three more fired on no sampled graph:
+produces. Four are removed ([Removed steps](#removed-steps)); the fifth is the
+second IrDecomposeVar. Three more fired on no sampled graph:
 IrReplaceInfAndLimitValues and constant sweeps 2 and 3.
 
 ### Removed steps
@@ -283,10 +278,14 @@ emitter"; rc4 has no backend pass or node visitor for these ops either.
 |---|---|---|
 | IrDecomposeSelectScatter (32) | select_scatter | The edge table removes `select_scatter.default`. On INT graphs rc4's quantizer-side DecomposeSelectScatterPass (:804) decomposes it first, so test_select_scatter's tosa_INT cases reach RETAB as arange, eq, expand_copy and where. |
 | IrDecomposeTril (35) | tril | The edge table removes `tril.default`, and on INT graphs rc4's quantizer-side DecomposeTrilPass (:817) decomposes it first. |
+| IrDecomposeRepeatInterleave (42) | repeat_interleave | The edge table removes `repeat_interleave.self_int`, so test_repeat's interleave case reaches RETAB as unsqueeze_copy, expand_copy and view_copy. rc4 has no such pass. |
+| IrDecomposePixelShuffle (43) | pixel_shuffle, pixel_unshuffle | The edge table removes both, so they reach RETAB as view_copy and permute_copy. rc4 has no such pass. |
 
 Removing them changed no output. The corpus delegates stayed byte-identical,
 and so did the TOSA RETAB produced for each tosa_INT test of the op-test files
-that build these ops: test_select_scatter and test_tril.
+that build these ops (test_select_scatter, test_tril and test_repeat) and for
+INT runs of test_pixel_shuffling's modules. That file has no tosa_INT case: its
+TOSA tests use FP and mixed-precision specs, which RETAB leaves to stock.
 
 ## rc4 steps RETAB has no step for
 

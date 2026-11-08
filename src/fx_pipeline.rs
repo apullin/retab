@@ -8,8 +8,6 @@ use crate::fx_decompose_cumsum_ir;
 use crate::fx_decompose_logit_ir;
 use crate::fx_decompose_masked_fill_ir;
 use crate::fx_decompose_ne_ir;
-use crate::fx_decompose_pixel_shuffle_ir;
-use crate::fx_decompose_repeat_interleave_ir;
 use crate::fx_remove_noop_ir;
 use crate::fx_replace_inf_values_ir;
 use crate::fx_replace_scalar_with_tensor_ir;
@@ -167,12 +165,6 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         )),
         Ir(Box::new(fx_decompose_addmm_ir::IrDecomposeAddmmPass)),
         Ir(Box::new(fx_decompose_cumsum_ir::IrDecomposeCumsumPass)),
-        Ir(Box::new(
-            fx_decompose_repeat_interleave_ir::IrDecomposeRepeatInterleavePass,
-        )),
-        Ir(Box::new(
-            fx_decompose_pixel_shuffle_ir::IrDecomposePixelShufflePass,
-        )),
         Ir(Box::new(
             fx_decompose_as_strided_copy_ir::IrDecomposeAsStridedCopyPass,
         )),
