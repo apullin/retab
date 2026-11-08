@@ -34,6 +34,10 @@ pub(crate) fn is_layout_dtype_passthrough(target: &OpTarget) -> bool {
     )
 }
 
+/// Ops whose output is their accumulator: the matmuls and the TOSA convs,
+/// IrRewriteConv's CONV3D included (P2 design X1). Ingest types a quantized
+/// one int32 (`ingest::finalize`), and the serializer gives it its accumulator
+/// dtype.
 pub(crate) fn is_accumulator_output(target: &OpTarget) -> bool {
     matches!(
         target,

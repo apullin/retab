@@ -3,6 +3,7 @@
 use crate::fx_ir::resolve_inferred_reshape_shape;
 use crate::graph::ir::*;
 use crate::graph::Graph;
+use crate::serialize::op_semantics::is_accumulator_output;
 
 // ---------------------------------------------------------------------------
 // Post-ingestion shape fixup
@@ -57,23 +58,6 @@ fn fixup_reshape_shapes(graph: &mut Graph) {
 // ---------------------------------------------------------------------------
 // Post-ingestion dtype fixup
 // ---------------------------------------------------------------------------
-
-/// Returns true for ops that produce int32 accumulator outputs, IrRewriteConv's TOSA
-/// CONV3D included (P2 design X1).
-fn is_accumulator_op(target: &OpTarget) -> bool {
-    matches!(
-        target,
-        OpTarget::TosaConv2d
-            | OpTarget::TosaDepthwiseConv2d
-            | OpTarget::TosaConv3d
-            | OpTarget::TosaTransposeConv2d
-            | OpTarget::Linear
-            | OpTarget::Addmm
-            | OpTarget::Matmul
-            | OpTarget::Bmm
-            | OpTarget::TosaMatmul
-    )
-}
 
 /// Fix up `meta.val.dtype` on all nodes based on quantization parameters.
 fn fixup_quantized_dtypes(graph: &mut Graph) {
@@ -139,7 +123,7 @@ fn fixup_quantized_dtypes_once(graph: &mut Graph) {
                 }
                 continue;
             }
-            if is_accumulator_op(&target) && (has_input_qp || has_output_qp) {
+            if is_accumulator_output(&target) && (has_input_qp || has_output_qp) {
                 if let Some(node) = graph.node_mut(node_id) {
                     node.meta.val.dtype = DType::Int32;
                 }
