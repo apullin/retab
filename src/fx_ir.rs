@@ -1133,6 +1133,14 @@ impl IrGraph {
             .collect()
     }
 
+    /// Whether a live user of `id` other than `id` itself reads it directly
+    /// rather than through a getitem.
+    pub(crate) fn has_direct_non_getitem_user(&self, id: NodeId) -> bool {
+        self.users(id)
+            .iter()
+            .any(|&user_id| user_id != id && !self.nodes[user_id].is_getitem())
+    }
+
     pub(crate) fn node_shape(&self, id: NodeId) -> Option<&[i64]> {
         self.nodes[id].meta.val_shape()
     }
@@ -1217,6 +1225,31 @@ impl IrGraph {
         self.replace_all_uses(old_id, new_id);
         self.erase(old_id);
         self.replacements.insert(old_id, new_id);
+    }
+
+    /// Give the users of `id`'s first result to `result`, then erase `id`. With
+    /// no getitem users, `id`'s own users are the first result's; otherwise
+    /// each `getitem(id, 0)` is replaced and erased. Returns false when `id`
+    /// has a direct non-getitem user, before changing anything, or a getitem
+    /// of another result; the getitems of result 0 before that one, in id
+    /// order, are already replaced then.
+    pub(crate) fn replace_primary_result_users(&mut self, id: NodeId, result: NodeId) -> bool {
+        let getitem_users = self.live_getitem_users(id);
+        if getitem_users.is_empty() {
+            self.replace_and_erase(id, result);
+            return true;
+        }
+        if self.has_direct_non_getitem_user(id) {
+            return false;
+        }
+        for (getitem_id, idx) in getitem_users {
+            if idx != 0 {
+                return false;
+            }
+            self.replace_and_erase(getitem_id, result);
+        }
+        self.erase(id);
+        true
     }
 
     /// Record a position anchor for IR-inserted nodes.
