@@ -1048,6 +1048,58 @@ impl<'g> LayoutCtx<'g> {
     }
 }
 
+/// `ArmOpTargetedPass.should_run_pass` (`backends/arm/_passes/arm_pass.py:295-305`):
+/// whether `graph` has a live call that `is_target` accepts. A targeted pass
+/// leaves a graph without one alone.
+pub(crate) fn has_target_op(graph: &IrGraph, mut is_target: impl FnMut(&IrNode) -> bool) -> bool {
+    graph
+        .live_call_function_ids()
+        .into_iter()
+        .any(|id| is_target(graph.node(id)))
+}
+
+/// The pool and upsample rewrites' `run`: plan and rewrite each call whose
+/// target `is_target` accepts, in graph order. A plan that fails, where rc4
+/// raises, requests the stock fallback with `pass_name` and the node's name,
+/// and stops the pass; the calls rewritten before it stay rewritten. A graph
+/// without a target call is left alone ([`has_target_op`]).
+pub(crate) fn run_planned_rewrites<P>(
+    graph: &mut IrGraph,
+    pass_name: &str,
+    is_target: impl Fn(&str) -> bool,
+    plan: impl Fn(&IrGraph, NodeId) -> Result<P, String>,
+    rewrite: impl Fn(&mut LayoutCtx<'_>, NodeId, &P),
+) -> bool {
+    if !has_target_op(graph, |node| is_target(&node.target)) {
+        return false;
+    }
+    let mut ctx = LayoutCtx::new(graph);
+    let mut modified = false;
+    for id in ctx.order().to_vec() {
+        let node = ctx.node(id);
+        if node.op != NodeOp::CallFunction || !is_target(&node.target) {
+            continue;
+        }
+        match plan(ctx.graph(), id) {
+            Ok(plan) => {
+                rewrite(&mut ctx, id, &plan);
+                modified = true;
+            }
+            Err(reason) => {
+                crate::stock_fallback::request(format!(
+                    "{pass_name}: {}: {reason}",
+                    ctx.node(id).name
+                ));
+                break;
+            }
+        }
+    }
+    if modified {
+        ctx.finish();
+    }
+    modified
+}
+
 /// The live nodes `node` reads, once each, in torch.fx's `Node.all_input_nodes`
 /// order ([`fx_node::all_input_nodes`]: args depth-first, then kwargs by key).
 /// Unlike that list, this one skips dead inputs: `IrGraph::erase` leaves a

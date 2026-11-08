@@ -152,7 +152,7 @@ use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, IrNode, NodeId, NodeMeta, NodeO
 use crate::fx_meta::TensorFacts;
 use crate::fx_target::{classify_ir_target, IrTargetKind};
 #[cfg(test)]
-use crate::layout::ctx::is_impure_call;
+use crate::layout::ctx::{has_target_op, is_impure_call};
 use crate::layout::ctx::LayoutCtx;
 use crate::layout::fx_node::{all_input_nodes, rc4_target};
 use crate::layout::pending::{is_pending_table, TABLE_OPS};
@@ -332,11 +332,7 @@ impl IrPass for IrRemovePermutesAroundElementwiseOpsPass {
 
 #[cfg(test)]
 fn run_standalone(graph: &mut IrGraph, config: &RemovePermutesConfig) -> bool {
-    if !graph
-        .live_call_function_ids()
-        .into_iter()
-        .any(|id| is_permute_copy(graph.node(id)))
-    {
+    if !has_target_op(graph, is_permute_copy) {
         return false;
     }
     let mut ctx = LayoutCtx::new(graph);

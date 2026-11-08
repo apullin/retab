@@ -67,7 +67,7 @@ use std::collections::HashMap;
 
 use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::fx_meta::TensorFacts;
-use crate::layout::ctx::LayoutCtx;
+use crate::layout::ctx::{run_planned_rewrites, LayoutCtx};
 use crate::layout::dtype::{operand_dtype, value_dtype};
 use crate::layout::meta;
 use crate::layout::pool::{
@@ -91,39 +91,13 @@ impl IrPass for IrRewriteAvgPool2dPass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        // `ArmOpTargetedPass` skips a graph without a target op.
-        if !graph
-            .live_call_function_ids()
-            .into_iter()
-            .any(|id| graph.node(id).target == AVG_POOL2D)
-        {
-            return false;
-        }
-        let mut ctx = LayoutCtx::new(graph);
-        let mut modified = false;
-        for id in ctx.order().to_vec() {
-            let node = ctx.node(id);
-            if node.op != NodeOp::CallFunction || node.target != AVG_POOL2D {
-                continue;
-            }
-            match plan(ctx.graph(), id) {
-                Ok(plan) => {
-                    rewrite(&mut ctx, id, &plan);
-                    modified = true;
-                }
-                Err(reason) => {
-                    crate::stock_fallback::request(format!(
-                        "IrRewriteAvgPool2d: {}: {reason}",
-                        ctx.node(id).name
-                    ));
-                    break;
-                }
-            }
-        }
-        if modified {
-            ctx.finish();
-        }
-        modified
+        run_planned_rewrites(
+            graph,
+            self.name(),
+            |target| target == AVG_POOL2D,
+            plan,
+            rewrite,
+        )
     }
 }
 

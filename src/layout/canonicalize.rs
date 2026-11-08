@@ -18,7 +18,7 @@
 use std::collections::HashSet;
 
 use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, IrPass, NodeId, NodeOp};
-use crate::layout::ctx::LayoutCtx;
+use crate::layout::ctx::{has_target_op, LayoutCtx};
 use crate::layout::dim_maps::{is_permutation, normalize_dim, normalize_dims, ViewMap};
 use crate::layout::shape::{int_list, refreshed_meta};
 use crate::permutation::{dims_to_i64, inverse_permutation, is_identity_permutation};
@@ -34,11 +34,7 @@ impl IrPass for IrCanonicalizeViewCopyPermutePass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        if !graph
-            .live_call_function_ids()
-            .into_iter()
-            .any(|id| is_target(graph, id))
-        {
+        if !has_target_op(graph, |node| is_target(graph, node.id)) {
             return false;
         }
         let mut ctx = LayoutCtx::new(graph);
