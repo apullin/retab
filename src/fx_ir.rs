@@ -134,6 +134,42 @@ pub(crate) fn shape_product(shape: &[i64]) -> i64 {
     }
 }
 
+/// A reshape's target `shape` with its negative dim (the -1) inferred from
+/// `input_shape`'s element count, or `shape` as is when no dim is negative.
+/// None when more than one dim is negative, when the other dims multiply to
+/// zero or don't divide the element count, or when a product overflows.
+pub(crate) fn resolve_inferred_reshape_shape(
+    shape: &[i64],
+    input_shape: &[i64],
+) -> Option<Vec<i64>> {
+    let negative_positions: Vec<usize> = shape
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, &dim)| (dim < 0).then_some(idx))
+        .collect();
+    if negative_positions.is_empty() {
+        return Some(shape.to_vec());
+    }
+    if negative_positions.len() > 1 {
+        return None;
+    }
+
+    let input_numel = input_shape
+        .iter()
+        .try_fold(1i64, |acc, &dim| acc.checked_mul(dim))?;
+    let known_product = shape
+        .iter()
+        .filter(|&&dim| dim >= 0)
+        .try_fold(1i64, |acc, &dim| acc.checked_mul(dim))?;
+    if known_product == 0 || input_numel % known_product != 0 {
+        return None;
+    }
+
+    let mut resolved = shape.to_vec();
+    resolved[negative_positions[0]] = input_numel / known_product;
+    Some(resolved)
+}
+
 pub(crate) fn broadcast_shapes(shapes: &[Vec<i64>]) -> Option<Vec<i64>> {
     let max_rank = shapes.iter().map(|s| s.len()).max().unwrap_or(0);
     let mut out = Vec::with_capacity(max_rank);
@@ -2150,6 +2186,22 @@ mod tests {
         assert_eq!(
             normalize_fx_target("<built-in function getitem>"),
             "<built-in function getitem>"
+        );
+    }
+
+    #[test]
+    fn a_reshape_infers_its_one_negative_dim() {
+        let resolve = |shape: &[i64]| resolve_inferred_reshape_shape(shape, &[2, 3, 4]);
+        assert_eq!(resolve(&[6, 4]), Some(vec![6, 4]));
+        assert_eq!(resolve(&[-1, 4]), Some(vec![6, 4]));
+        assert_eq!(resolve(&[2, -1]), Some(vec![2, 12]));
+        assert_eq!(resolve(&[-1, -1]), None);
+        assert_eq!(resolve(&[0, -1]), None);
+        assert_eq!(resolve(&[5, -1]), None);
+        // The input's element count overflows.
+        assert_eq!(
+            resolve_inferred_reshape_shape(&[-1, 2], &[i64::MAX, 2]),
+            None
         );
     }
 

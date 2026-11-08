@@ -1,4 +1,5 @@
 use super::*;
+use crate::fx_ir::resolve_inferred_reshape_shape;
 use crate::serialize::op_semantics;
 use std::cell::RefCell;
 use std::collections::HashMap as StdHashMap;
@@ -33,33 +34,11 @@ pub(super) fn val_rank(node: &Node) -> usize {
     node.meta.val.shape_len as usize
 }
 
+/// [`resolve_inferred_reshape_shape`] on the serializer's i32 shapes.
 fn resolve_inferred_shape(shape: &[i32], input_shape: &[i32]) -> Option<Vec<i32>> {
-    let negative_positions: Vec<usize> = shape
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, &dim)| (dim < 0).then_some(idx))
-        .collect();
-    if negative_positions.is_empty() {
-        return Some(shape.to_vec());
-    }
-    if negative_positions.len() > 1 {
-        return None;
-    }
-
-    let input_numel = input_shape
-        .iter()
-        .try_fold(1i64, |acc, &dim| acc.checked_mul(dim as i64))?;
-    let known_product = shape
-        .iter()
-        .filter(|&&dim| dim >= 0)
-        .try_fold(1i64, |acc, &dim| acc.checked_mul(dim as i64))?;
-    if known_product == 0 || input_numel % known_product != 0 {
-        return None;
-    }
-
-    let mut resolved = shape.to_vec();
-    resolved[negative_positions[0]] = (input_numel / known_product) as i32;
-    Some(resolved)
+    let widen = |dims: &[i32]| dims.iter().map(|&dim| i64::from(dim)).collect::<Vec<_>>();
+    let resolved = resolve_inferred_reshape_shape(&widen(shape), &widen(input_shape))?;
+    Some(resolved.into_iter().map(|dim| dim as i32).collect())
 }
 
 /// `axis` counted from the front of `node`'s val; an axis outside it comes back as is.

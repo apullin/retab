@@ -1,41 +1,12 @@
 //! Post-conversion graph finalization for serialize graphs produced from Rust IR.
 
+use crate::fx_ir::resolve_inferred_reshape_shape;
 use crate::graph::ir::*;
 use crate::graph::Graph;
 
 // ---------------------------------------------------------------------------
 // Post-ingestion shape fixup
 // ---------------------------------------------------------------------------
-
-/// `shape` with its one -1 (if any) resolved against `input_shape`'s element count.
-fn resolve_inferred_reshape_shape(shape: &[i64], input_shape: &[i64]) -> Option<Vec<i64>> {
-    let negative_positions: Vec<usize> = shape
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, &dim)| (dim < 0).then_some(idx))
-        .collect();
-    if negative_positions.is_empty() {
-        return Some(shape.to_vec());
-    }
-    if negative_positions.len() > 1 {
-        return None;
-    }
-
-    let input_numel = input_shape
-        .iter()
-        .try_fold(1i64, |acc, &dim| acc.checked_mul(dim))?;
-    let known_product = shape
-        .iter()
-        .filter(|&&dim| dim >= 0)
-        .try_fold(1i64, |acc, &dim| acc.checked_mul(dim))?;
-    if known_product == 0 || input_numel % known_product != 0 {
-        return None;
-    }
-
-    let mut resolved = shape.to_vec();
-    resolved[negative_positions[0]] = input_numel / known_product;
-    Some(resolved)
-}
 
 /// Give each Reshape/View/Flatten node its target shape (`args[1]`) as its val.
 fn fixup_reshape_shapes(graph: &mut Graph) {
