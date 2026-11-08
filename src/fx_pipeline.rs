@@ -613,10 +613,14 @@ mod tests {
                 );
                 // The constant effect passes run only after IrMaterializeConstants,
                 // which folds what they would plan before it under new names.
-                assert!(
-                    position("IrMaterializeConstants") < position("IrFuseZeroInputConstantsEp"),
-                    "{spec}"
-                );
+                let materialize = position("IrMaterializeConstants");
+                for pass in [
+                    "IrFuseZeroInputConstantsEp",
+                    "IrFuseShapeOnlyConstantsEp",
+                    "IrFuseConstantInputsEp",
+                ] {
+                    assert!(materialize < position(pass), "{spec}: {pass}");
+                }
 
                 // The phase-6 block, once, after the late IrRemoveNoop.
                 let phase6 = position("IrRewriteUpsample");
