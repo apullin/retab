@@ -18,9 +18,8 @@
 //!
 //! rc4's FuseConstantArgs (`:700`) folds the `logical_xor` and `logical_not`
 //! of an eq between two constants into one constant. So does RETAB's fold
-//! planner, IrFuseConstantInputsEffectPass, which runs just after this pass
-//! and inside IrMaterializeConstants: it folds logical ops as well as
-//! comparisons. Only a graph lowered without the quantizer can bring such an
+//! planner, IrFuseConstantInputsEffectPass, which IrMaterializeConstants runs
+//! later in the pipeline: it folds logical ops as well as comparisons. Only a graph lowered without the quantizer can bring such an
 //! eq; the quantized flow folds it before RETAB sees it.
 //!
 //! The port builds its nodes as rc4's `call_operator(op, args, {}, meta,
