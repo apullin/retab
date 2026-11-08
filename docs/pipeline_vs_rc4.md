@@ -325,13 +325,21 @@ DecomposeLog1pPass (:625), which skip quantized ops.
 - DecomposeUnsupportedBilinearResizePass (:696): IrRewriteUpsample sends the
   exact 1/16 bilinear downscale it handles to stock.
 
-**A gap (1).** DecomposeBoolEqualityPass (:672) has no RETAB step at v0.4.1,
-so RETAB serializes a bool eq.Tensor as EQUAL, which TOSA accepts only for
-numeric inputs. Generic INT and U85 specs delegate such an eq; U55 doesn't.
-Branch fix/bool-equality (Linear APU-123) ports the pass at its rc4 slot.
+**Gaps (2).** Neither pass has a RETAB step at v0.4.1:
 
-**Not checked op by op (4):** PrepareGatherIndicesPass (:548), which removes
-int32-to-int64 casts on gather indices; MatchArgDtypePass (:662);
+- DecomposeBoolEqualityPass (:672). RETAB serializes a bool eq.Tensor as
+  EQUAL, which TOSA accepts only for numeric inputs. Generic INT and U85 specs
+  delegate such an eq; U55 doesn't. Branch fix/bool-equality (Linear APU-123)
+  ports the pass at its rc4 slot.
+- PrepareGatherIndicesPass (:548). rc4's partitioner delegates an
+  int32-to-int64 cast in front of a gather's indices along with the gather,
+  and the pass points the gather back at the int32 indices. RETAB serializes
+  the cast instead and fails on its INT64 tensor, where stock lowers the
+  graph. rc4's TopKGather case hits it on generic INT and U85 specs. Branch
+  fix/gather-indices (Linear APU-167) ports the pass at its rc4 slot, between
+  IrFuseQuantActivation and IrConvertClamp.
+
+**Not checked op by op (3):** MatchArgDtypePass (:662);
 UnsqueezeScalarPlaceholdersPass (:663); and
 NormalizeTransformInputPlaceholdersPass (:756). The last one also keeps the
 graph signature in step, which RETAB doesn't have, since it keys inputs by node

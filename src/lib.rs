@@ -79,6 +79,7 @@ mod fx_normalize_index_put_bool_mask_ir;
 mod fx_normalize_index_put_none_indices_ir;
 mod fx_normalize_maxpool_rank_ir;
 mod fx_pipeline;
+mod fx_prepare_gather_indices_ir;
 mod fx_py_attr;
 mod fx_quant;
 mod fx_quantize_clamp_args_ir;
