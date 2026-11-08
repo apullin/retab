@@ -59,6 +59,15 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         Ir(Box::new(
             crate::fx_fuse_quant_activation_ir::IrFuseQuantActivationPass,
         )),
+        // PrepareGatherIndicesPass (APM:548): a delegated gather reads its int32
+        // indices instead of the int64 cast in front of them, whose tensor TOSA 1.0
+        // can't hold (APU-167). rc4 runs it between FuseQuantizedActivation (:545) and
+        // ConvertToClamp (:550); of the passes in between, DecomposeTopK (:547) and
+        // RewriteBoolToFp32CastViaInt8 (:546) never fire for INT specs, and RETAB runs
+        // CanonicalizeGather (:549) after the fold.
+        Ir(Box::new(
+            crate::fx_prepare_gather_indices_ir::IrPrepareGatherIndicesPass::new(config),
+        )),
         Ir(Box::new(fx_convert_clamp_ir::IrConvertClampPass)),
         Ir(Box::new(
             crate::fx_decompose_layernorm_ir::IrDecomposeLayerNormPass,
@@ -552,6 +561,21 @@ mod tests {
                     assert_eq!(count("IrNormalizeDelegateIOLayout"), 1, "{spec}");
                 }
 
+                // APM:548, PrepareGatherIndices, between FuseQuantizedActivation (:545)
+                // and ConvertToClamp (:550), before RETAB's CanonicalizeGather (:549).
+                let prepare = position("IrPrepareGatherIndices");
+                assert_eq!(
+                    &names[prepare - 1..prepare + 2],
+                    [
+                        "IrFuseQuantActivation",
+                        "IrPrepareGatherIndices",
+                        "IrConvertClamp"
+                    ],
+                    "{spec}"
+                );
+                assert_eq!(count("IrPrepareGatherIndices"), 1, "{spec}");
+                assert!(prepare < position("IrCanonicalizeGather"), "{spec}");
+
                 // APM:586-592: FuseConsecutiveClamps, FuseDuplicateUsers, then
                 // FuseIdenticalInputTransforms right before DecomposeLinear (RETAB
                 // decomposes flip and roll there too).
@@ -831,6 +855,114 @@ mod tests {
                 out.args[0].as_node(),
                 Some(live_node(&graph, "ne_logical_not").id)
             );
+        }
+    }
+
+    /// rc4's TopKGather delegate on TOSA-1.0+INT and Ethos-U85 (APU-167): the int32
+    /// topk indices come in, are unsqueezed and expanded, and an int64 cast feeds the
+    /// gather. Through the whole parent and cond-region pipelines the cast goes, and
+    /// the gather becomes TOSA's GATHER on the expanded int32 indices, as stock's
+    /// does. Before IrPrepareGatherIndices (APM:548) the cast reached the
+    /// serializer, which refuses its INT64 tensor.
+    #[test]
+    fn topk_gather_indices_reach_tosa_gather_as_int32_in_parent_and_regions() {
+        use std::collections::HashMap;
+
+        use crate::fx_ir::{IrArg, IrGraph, NodeId, NodeMeta, NodeOp};
+        use crate::layout::shape::mark_contiguous;
+        use crate::test_ir::{call_with_meta, output, placeholder};
+
+        fn value(shape: &[i64], dtype: &str) -> NodeMeta {
+            let mut meta = NodeMeta::tensor(shape.to_vec(), dtype);
+            mark_contiguous(&mut meta);
+            meta
+        }
+        fn input(graph: &mut IrGraph, name: &str, shape: &[i64], dtype: &str) -> NodeId {
+            let id = placeholder(graph, name, shape.to_vec(), dtype);
+            mark_contiguous(&mut graph.node_mut(id).meta);
+            id
+        }
+
+        for spec in ["TOSA-1.0+INT", "TOSA-1.0+INT+int16+int4+cf"] {
+            let config = PipelineConfig::from_tosa_spec(spec);
+            for steps in [
+                lowering_steps(true, &config),
+                build_ir_cond_submodule_pipeline(&config),
+            ] {
+                let mut graph = IrGraph::empty();
+                let features = input(&mut graph, "features", &[2, 8, 2], "torch.int8");
+                let indices = input(&mut graph, "indices", &[2, 3], "torch.int32");
+                let unsqueeze = call_with_meta(
+                    &mut graph,
+                    "unsqueeze",
+                    "aten.unsqueeze_copy.default",
+                    vec![IrArg::Node(indices), IrArg::Int(-1)],
+                    value(&[2, 3, 1], "torch.int32"),
+                );
+                let expand = call_with_meta(
+                    &mut graph,
+                    "expand",
+                    "aten.expand_copy.default",
+                    vec![
+                        IrArg::Node(unsqueeze),
+                        IrArg::List(vec![IrArg::Int(-1), IrArg::Int(-1), IrArg::Int(2)]),
+                    ],
+                    value(&[2, 3, 2], "torch.int32"),
+                );
+                let cast = graph.add_node_with_kwargs(
+                    NodeOp::CallFunction,
+                    "cast".to_owned(),
+                    "dim_order_ops._to_dim_order_copy.default".to_owned(),
+                    vec![IrArg::Node(expand)],
+                    HashMap::from([("dtype".to_owned(), IrArg::Dtype("torch.int64".to_owned()))]),
+                    value(&[2, 3, 2], "torch.int64"),
+                );
+                let gather = call_with_meta(
+                    &mut graph,
+                    "gather",
+                    "aten.gather.default",
+                    vec![IrArg::Node(features), IrArg::Int(1), IrArg::Node(cast)],
+                    value(&[2, 3, 2], "torch.int8"),
+                );
+                output(&mut graph, gather);
+
+                crate::stock_fallback::take();
+                run_steps(&steps, &mut graph);
+                assert_eq!(crate::stock_fallback::take(), None, "{spec}");
+
+                assert!(
+                    !graph.live_nodes().any(|node| node.name == "cast"),
+                    "{spec}"
+                );
+                let gathers: Vec<_> = graph
+                    .live_nodes()
+                    .filter(|node| node.target == "backend.tosa.GATHER.default")
+                    .collect();
+                assert_eq!(gathers.len(), 1, "{spec}");
+                // CanonicalizeGather's rank-3 path permutes and flattens the indices
+                // to [N*C, W]; above that is the expand of the unsqueeze (a view by
+                // now) of the int32 input. Data movement only, so the serializer
+                // gives each of them the input's INT32
+                // (`serialize::explicit_gather_index_tests`).
+                let mut index = gathers[0].args[1].as_node().expect("an index node");
+                assert_eq!(graph.node_shape(index), Some([4, 3].as_slice()), "{spec}");
+                let mut chain = Vec::new();
+                while let Some(input) = graph.node(index).args.first().and_then(IrArg::as_node) {
+                    chain.push(graph.node(index).target.as_str());
+                    index = input;
+                }
+                assert_eq!(graph.node(index).name, "indices", "{spec}");
+                assert_eq!(
+                    chain,
+                    [
+                        "aten.view_copy.default",
+                        "aten.permute_copy.default",
+                        "aten.expand_copy.default",
+                        "aten.view_copy.default"
+                    ],
+                    "{spec}"
+                );
+            }
         }
     }
 

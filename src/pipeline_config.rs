@@ -43,6 +43,7 @@ pub struct PipelineConfig {
     pub int16: bool,
     pub int4: bool,
     pub cf: bool,
+    pub support_integer: bool,
     pub support_float: bool,
     pub tosa_dev_mode: bool,
     pub softmax: SoftmaxDecompositionConfig,
@@ -69,6 +70,7 @@ impl PipelineConfig {
             int16: features.contains(&"int16"),
             int4: features.contains(&"int4"),
             cf: features.contains(&"cf"),
+            support_integer: features.contains(&"INT"),
             support_float: features.contains(&"FP"),
             tosa_dev_mode: false,
             softmax: if is_u55_subset {
@@ -124,6 +126,15 @@ impl PipelineConfig {
         Ok(result)
     }
 
+    /// Whether the spec lists `extension` (`bf16`, `int16`, ...). rc4's
+    /// `support_extension` also needs a profile that defines the extension.
+    pub fn lists_extension(&self, extension: &str) -> bool {
+        self.tosa_spec
+            .split('+')
+            .skip(1)
+            .any(|token| token == extension)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         let guard = match self.sdpa_safe_softmax_guard {
             SdpaSafeSoftmaxGuardPolicy::Preserve => None,
@@ -171,10 +182,14 @@ mod tests {
     fn extensions_and_float_support_require_exact_spec_tokens() {
         let int = PipelineConfig::from_tosa_spec("TOSA-1.0+INT+cf");
         assert!(!int.int16 && !int.int4 && !int.is_u55_subset && !int.support_float);
-        assert!(int.cf);
+        assert!(int.cf && int.support_integer);
+        assert!(int.lists_extension("cf") && !int.lists_extension("int16"));
         let fp = PipelineConfig::from_tosa_spec("TOSA-1.0+INT+FP+int16");
-        assert!(fp.support_float && fp.int16);
+        assert!(fp.support_float && fp.support_integer && fp.int16);
         assert!(!fp.cf && !fp.int4 && !fp.is_u55_subset);
+        let fp_only = PipelineConfig::from_tosa_spec("TOSA-1.0+FP+bf16");
+        assert!(fp_only.support_float && !fp_only.support_integer);
+        assert!(fp_only.lists_extension("bf16") && !fp_only.lists_extension("bf"));
     }
 
     #[test]
