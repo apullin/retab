@@ -34,6 +34,9 @@ the whole list again on each cond and while region.
 - **while region** (`build_ir_while_submodule_pipeline`): the cond list plus two
   steps, so 100 steps (102 on U55).
 
+These are v0.4.1's counts. The steps listed under
+[Removed steps](#removed-steps) have since left all three lists.
+
 The unit test `pipelines_build_rc4s_order_in_parent_and_regions` pins phase 6
 and several of the other slots below. Of rc4's 161 steps, 107 have a RETAB
 step: IrDecomposeOps alone covers 18 of
@@ -46,8 +49,9 @@ runs. The other 54 are listed under
 
 ## Parent pipeline
 
-Numbers are the TOSA-1.0+INT positions, which `RETAB_LOG` prints for that
-spec; "U55" marks the steps only Ethos-U55 gets. **Moved** steps run
+Numbers are the TOSA-1.0+INT positions at v0.4.1, which `RETAB_LOG` printed
+for that spec; "U55" marks the steps only Ethos-U55 gets. The steps removed
+since leave gaps ([Removed steps](#removed-steps)). **Moved** steps run
 away from their rc4 slot ([Order differences](#order-differences-before-phase-6)).
 **RETAB-only** steps are explained in [RETAB-only steps](#retab-only-steps).
 
@@ -81,29 +85,23 @@ away from their rc4 slot ([Order differences](#order-differences-before-phase-6)
 | 29 | IrDecomposeIndexTensor | DecomposeIndexTensorToGatherPass, :643 | U55 mode as rc4. |
 | 30 | IrDecomposeIndexSelect | DecomposeIndexSelectToGatherPass, :639 | |
 | 31 | IrDecomposeUnfold | DecomposeUnfoldToGatherPass, :636 | U55 mode as rc4. |
-| 32 | IrDecomposeSelectScatter | (DecomposeSelectScatterPass, quantizer side, :804) | RETAB-only. |
 | 33 | IrDecomposeSliceScatter | DecomposeSliceScatterPass, :641 | |
 | 34 | IrDecomposeStridedSlice | DecomposeStridedSliceCopyPass, :640 | |
-| 35 | IrDecomposeTril | (DecomposeTrilPass, quantizer side, :817) | RETAB-only. |
 | 36 | IrDecomposeLogit | DecomposeLogitPass, :609 | |
 | 37 | IrDecomposeNotEqual | DecomposeNotEqualPass, :671 | Moved. |
 | 38 | IrReplaceScalarWithTensor | ReplaceScalarWithTensorByProfilePass, :656 | Scalar shifts, and eq.Scalar and ne.Scalar on a bool tensor (APU-123); the serializer takes the other scalar operands. |
 | 39 | IrDecomposeDivTensorMode | DecomposeDivTensorModePass, :678 | Moved. |
 | 40 | IrDecomposeAddmm | DecomposeAddmmPass, :621 | Moved. |
 | 41 | IrDecomposeCumsum | DecomposeCumsumPass, :689 | Moved. |
-| 42 | IrDecomposeRepeatInterleave | none | RETAB-only. |
-| 43 | IrDecomposePixelShuffle | none | RETAB-only. |
 | 44 | IrDecomposeAsStridedCopy | DecomposeAsStridedCopyPass, :690 | Moved. |
 | 45 | IrQuantizeClampArgs | QuantizeClampArgumentsPass, :604 | Moved. |
 | 46 | IrConvertFullLike | ConvertFullLikeToFullPass, :661 | |
 | 47 | IrMatchArgRanks | MatchArgRanksPass, :664 | |
-| 48-50 | IrFuseZeroInputConstantsEp, IrFuseShapeOnlyConstantsEp, IrFuseConstantInputsEp (`matmul_only`) | none | RETAB-only: constant sweep 1. |
 | 51 | IrDecomposeAdaptiveAvgPool | DecomposeAdaptiveAvgPool2dPass, :647 | Moved. |
 | 52 | IrDecomposeAvgPoolPad | DecomposeAvgPool2dPass, :649 | Moved. |
 | 53 | IrNormalizeMaxPool2dInputRank | NormalizeMaxPool2dInputRankPass, :692 | |
 | 54 | IrDecomposeMaxPoolDilation | DecomposeMaxPool2dPass, :693 | |
 | U55 | IrDecomposeLargeStrideMaxPool2dForU55 | :694 | rc4 checks for U55 inside the pass. |
-| 55 | IrDecomposeVar | none | RETAB-only: a second instance. |
 | 56 | IrDecomposeMean | DecomposeMeanDimPass, :555 | Moved. |
 | 57 | IrConvertBoolSum | ConvertBoolSumPass, :626 | Moved. |
 | 58 | IrLegalizeIntegerArithmetic | none | RETAB-only. |
@@ -231,7 +229,7 @@ is recorded: RETAB's order predates the rc4 port, and the gate passes with it
 | IrDecomposeDivTensorMode, IrDecomposeCumsum, IrDecomposeAsStridedCopy (39, 41, 44) | :678, :689, :690, phase 5 | Before IrConvertFullLike and IrMatchArgRanks (:661, :664) | Historical. The binary ops they create are rank-matched at step 47 rather than in phase 6 (:732). | 0 |
 | IrDecomposeAddmm (40) | :621, phase 3 | After IrReplaceScalarWithTensor (:656) | Historical. It creates no `.Scalar` op, so the scalar rewrite's position doesn't matter. | 0 |
 | IrQuantizeClampArgs (45) | :604, phase 3 | After the phase-4 and phase-5 decompositions | Historical. It keeps rc4's one constraint (:581-586): FuseConsecutiveClamps runs first, while clamp bounds are still float. | 15 |
-| IrDecomposeAdaptiveAvgPool, IrDecomposeAvgPoolPad, IrDecomposeVar (second), IrDecomposeMean (51-52, 55-56) | :647, :649, :554-555 | After IrMatchArgRanks (:664) | Recorded in the code as P2 critique B9. The binary ops they create miss this rank match, so U55's IrBroadcastArgs sees them unmatched; phase 6's IrMatchArgRanks (:732) matches them before serialization. | 0 |
+| IrDecomposeAdaptiveAvgPool, IrDecomposeAvgPoolPad, IrDecomposeMean (51-52, 56) | :647, :649, :555 | After IrMatchArgRanks (:664) | Recorded in the code as P2 critique B9. The binary ops they create miss this rank match, so U55's IrBroadcastArgs sees them unmatched; phase 6's IrMatchArgRanks (:732) matches them before serialization. | 0 |
 | IrConvertBoolSum (57) | :626, phase 3 | Phase 5 | Historical. | 0 |
 | IrCastToInt32, IrBroadcastArgs (U55), IrConvertSum, IrInsertTableOpsEp (59-60) | :704-708 | Before :695-703, SizeAdjustInput through ConvertSqueezesToView | Historical. IrInsertTableOpsEp only records TABLE effects, and the layout passes treat a pending table op as a TABLE wherever it runs (`layout::pending`). | 85 and 48 |
 | IrDecomposeGroupedConv (61) | :635, phase 3 | After :708, before :695 | Historical. IrMaterializeConstants (64) folds its weight slices, as rc4 folds them at :699-700. | 0 |
@@ -250,21 +248,60 @@ crossing a phase boundary.
 |---|---|---:|---|
 | IrRecordControlFlowRescaleTargets (9) | RETAB inserts cond and while boundary RESCALEs at serialization, where rc4 inserts them at :595. This step records each output's target qparams from the quantize after its getitem, before IrFoldQdq folds that quantize. | n/a | Keep. It writes metadata only, so it never reports a change; any graph with a cond or while needs it. |
 | IrReplaceInfAndLimitValues (22) | Replaces ±inf and float32 limits in literal arguments, which rc4 does only on the quantizer side (:881). | 0 | Duplicates RETAB's input contract. Remove with a gate. |
-| IrDecomposeSelectScatter (32), IrDecomposeTril (35) | Decompose select_scatter and tril, which rc4 does only on the quantizer side (:804, :817). | 0 | Can't fire: ExecuTorch's edge decomposition table removes select_scatter and tril, and rc4's partitioner keeps neither. Remove with a gate. |
-| IrDecomposeRepeatInterleave (42), IrDecomposePixelShuffle (43) | Decompose repeat_interleave, pixel_shuffle and pixel_unshuffle; rc4 has no such pass. | 0 | Can't fire, for the same reason: the edge table removes repeat_interleave.self_int, pixel_shuffle and pixel_unshuffle. Remove with a gate. |
-| Constant sweep 1 (48-50) | RETAB's older constant folding. It records MaterializeTensorNode effects, which ingest applies by node name. | 102 | Probably redundant. IrMaterializeConstants (64) re-plans with the same planners and gives each node it folds a new name, which voids the sweep's effect for that node. The sweep fired on 102 sampled graphs and step 64 on 106. An A/B settles it: skip the sweep, then byte-compare the corpus and the op suite. |
-| IrDecomposeVar, second (55) | A second pass over var nodes, left from RETAB's older order. | 0 | Can't fire. IrDecomposeLayerNorm (7) is the only step that creates var nodes, and the first IrDecomposeVar (8) follows it. A var the first leaves has no input shape, and nothing in between gives it one. Remove with a gate. |
 | IrLegalizeIntegerArithmetic (58) | TOSA's integer ADD, SUB and REDUCE_SUM take int32 operands. The step casts raw (unquantized) int8 or int16 operands of add, sub and sum to int32, and the result back. rc4's InsertRescaleInt32Pass handles only quantized operands. | 2 | Keep. It fired only on test_to_copy's two REDUNDANT_CAST cases, raw int8 and int16 adds that stock fails to lower; rc4 marks them as expected failures (APU-77). |
 | IrFuseCascadedViews (66) | Fuses view chains and keeps the last view, where rc4's FuseViewCopyTransform (:725, :744) keeps the first. | 25 | Keep. APU-161 measured it: skipping it renamed tensors in 6 of 27 corpus delegates. It fired on 29 of 1,169 view-related op tests, and skipping it changed 28 of their dumps, 13 of them in op order, without getting closer to stock. |
-| Constant sweeps 2 and 3 (71-72, 93-95) | The sweep-1 planners again, after IrMaterializeConstants and after phase 6. | 0 | Remove with a gate. |
+| Constant sweeps 2 and 3 (71-72, 93-95) | RETAB's older constant folding, as was constant sweep 1 ([Removed steps](#removed-steps)): they record MaterializeTensorNode effects, which ingest applies by node name, after IrMaterializeConstants and after phase 6. | 0 | Remove with a gate. |
 | IrControlFlowOutputGuard (99) | Sends the graph to stock when layout copies hide a control-flow output's boundary target and step 9 recorded none. | n/a | Keep as a guard. It never changes the graph, and it requested no stock fallback in the sample. |
 | IrStripWhileBoundaryQ (while regions) | See [Regions](#regions). | 14 | Keep. |
 
-So, with RETAB's edge fast paths off, five RETAB-only steps can never fire on
-the graphs stock's edge pipeline produces: IrDecomposeSelectScatter,
-IrDecomposeTril, IrDecomposeRepeatInterleave, IrDecomposePixelShuffle and the
-second IrDecomposeVar. Three more fired on no sampled graph:
-IrReplaceInfAndLimitValues and constant sweeps 2 and 3.
+So five RETAB-only steps could never fire on the graphs stock's edge pipeline
+produces, and they are removed ([Removed steps](#removed-steps)), as is
+constant sweep 1, which fired but changed no output. Three more fired on no
+sampled graph: IrReplaceInfAndLimitValues and constant sweeps 2 and 3.
+
+### Removed steps
+
+These RETAB-only steps fired on none of the 325 sampled runs, and can't fire,
+so they were removed after v0.4.1.
+
+| Step (v0.4.1 #) | Op | Why it can't fire |
+|---|---|---|
+| IrDecomposeSelectScatter (32) | select_scatter | The edge table removes `select_scatter.default`. On INT graphs rc4's quantizer-side DecomposeSelectScatterPass (:804) decomposes it first, so test_select_scatter's tosa_INT cases reach RETAB as arange, eq, expand_copy and where. |
+| IrDecomposeTril (35) | tril | The edge table removes `tril.default`, and on INT graphs rc4's quantizer-side DecomposeTrilPass (:817) decomposes it first. |
+| IrDecomposeRepeatInterleave (42) | repeat_interleave | The edge table removes `repeat_interleave.self_int`, so test_repeat's interleave case reaches RETAB as unsqueeze_copy, expand_copy and view_copy. rc4 has no such pass. |
+| IrDecomposePixelShuffle (43) | pixel_shuffle, pixel_unshuffle | The edge table removes both, so they reach RETAB as view_copy and permute_copy. rc4 has no such pass. |
+| IrDecomposeVar, second (55) | var | IrDecomposeLayerNorm (7) is the only step that creates var nodes, and the first IrDecomposeVar (8) follows it, in rc4's slot (:554). That step decomposes every var whose input has a known shape, and nothing between the two creates a var or gives a var's input a shape. The order test now pins a single IrDecomposeVar right after IrDecomposeLayerNorm. |
+
+The first four decomposed ops that never reach RETAB: ExecuTorch's edge
+decomposition table removes them, rc4's partitioner keeps none of them
+(`ops_to_not_decompose`, `backends/arm/tosa/partitioner.py:890`), and no RETAB
+step creates them. RETAB's edge fast paths, which `install()` refuses, apply
+the same table. Should one of these ops reach RETAB anyway, as a custom
+partition op for instance, the serializer stops with "RETAB has no TOSA
+emitter"; rc4 has no backend pass or node visitor for these ops either.
+
+Constant sweep 1 (48-50: IrFuseZeroInputConstantsEp, IrFuseShapeOnlyConstantsEp
+and IrFuseConstantInputsEp `matmul_only`) is removed too. It did fire, on 102
+sampled graphs, but none of its effects reached the output. It recorded
+MaterializeTensorNode effects, which ingest applies by node name, and
+IrMaterializeConstants (64) runs the same planners and gives each node it folds
+a new name (`<node>_pre_computed` or `<node>_fused_const`), so ingest found no
+live node under the names the sweep recorded (P2 design F9). Sweep 2 runs the
+zero-input and shape-only planners again after step 64, and sweep 3 runs all
+three after phase 6; neither found anything to plan on any sampled graph. Step
+64 follows rc4's folding rules, so where it leaves a node alone, the sweep could
+only have folded something rc4 doesn't. The order test now pins the constant
+effect passes after IrMaterializeConstants.
+
+None of these removals changed any output. Each was checked by byte-comparing
+RETAB's TOSA before and after for the 28 corpus delegates; for the 499
+delegates, 491 of them lowered by RETAB, of the 507 tosa_INT tests in 22
+op-test files (the 20 of the [firing sample](#how-the-firing-data-was-taken)
+plus test_conv2d and test_linear); and for 10 INT runs of
+test_pixel_shuffling's modules. That file has no tosa_INT case: its TOSA tests
+use FP and mixed-precision specs, which RETAB leaves to stock. Everything stayed
+byte-identical, first for the five steps in the table and then for constant
+sweep 1 on top of them.
 
 ## rc4 steps RETAB has no step for
 
@@ -367,12 +404,13 @@ them:
    softmax, min and max, select_scatter, tril, addmm and masked_fill, converted
    bool sums, and replaced ±inf literals.
 
-The third stage is why IrDecomposeLayerNorm, both IrDecomposeVar steps,
-IrDecomposeMean and IrDecomposeOps fired on no sampled graph, not even in
-test_layer_norm, test_var, test_mean_dim, test_group_norm and test_batch_norm.
-rc4's backend copies of those passes have nothing to do there either. RETAB's
-backend pipeline repeats three quantizer-side steps: IrReplaceInfAndLimitValues,
-IrDecomposeSelectScatter and IrDecomposeTril.
+The third stage is why IrDecomposeLayerNorm, both of v0.4.1's IrDecomposeVar
+steps, IrDecomposeMean and IrDecomposeOps fired on no sampled graph, not even
+in test_layer_norm, test_var, test_mean_dim, test_group_norm and
+test_batch_norm. rc4's backend copies of those passes have nothing to do there
+either. RETAB's backend pipeline repeats one quantizer-side step,
+IrReplaceInfAndLimitValues. It also repeated IrDecomposeSelectScatter and
+IrDecomposeTril until they were removed ([Removed steps](#removed-steps)).
 
 ## How the firing data was taken
 

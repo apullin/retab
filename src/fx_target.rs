@@ -397,16 +397,6 @@ pub(crate) fn is_gather_target(target: &str) -> bool {
     target == "aten.gather.default"
 }
 
-pub(crate) fn is_tril_target(target: &str) -> bool {
-    matches!(
-        target,
-        "aten.tril.default"
-            | "aten.tril_copy.default"
-            | "aten_tril.default"
-            | "aten_tril_copy.default"
-    )
-}
-
 pub(crate) fn is_embedding_target(target: &str) -> bool {
     target == "aten.embedding.default"
 }
@@ -473,14 +463,6 @@ pub(crate) fn is_pad_target(target: &str) -> bool {
     matches!(target, "aten.pad.default" | "aten.constant_pad_nd.default")
 }
 
-pub(crate) fn is_pixel_shuffle_target(target: &str) -> bool {
-    target == "aten.pixel_shuffle.default"
-}
-
-pub(crate) fn is_pixel_unshuffle_target(target: &str) -> bool {
-    target == "aten.pixel_unshuffle.default"
-}
-
 pub(crate) fn is_squeeze_target(target: &str) -> bool {
     matches!(
         target,
@@ -527,10 +509,6 @@ pub(crate) fn is_masked_fill_target(target: &str) -> bool {
             | "aten.masked_fill_.Scalar"
             | "aten.masked_fill_.Tensor"
     )
-}
-
-pub(crate) fn is_select_scatter_target(target: &str) -> bool {
-    target == "aten.select_scatter.default"
 }
 
 pub(crate) fn is_clamp_target(target: &str) -> bool {
@@ -604,10 +582,6 @@ pub(crate) fn scalar_shift_replacement_target(target: &str) -> Option<&'static s
     }
 }
 
-pub(crate) fn is_repeat_interleave_self_int_target(target: &str) -> bool {
-    target == "aten.repeat_interleave.self_int"
-}
-
 pub(crate) fn is_max_pool2d_target(target: &str) -> bool {
     matches!(
         target,
@@ -654,7 +628,6 @@ mod tests {
             is_cat_target,
             is_unfold_copy_target,
             is_gather_target,
-            is_tril_target,
             is_embedding_target,
             is_logit_target,
             is_index_select_target,
@@ -667,8 +640,6 @@ mod tests {
             is_adaptive_avg_pool2d_target,
             is_as_strided_copy_target,
             is_pad_target,
-            is_pixel_shuffle_target,
-            is_pixel_unshuffle_target,
             is_squeeze_target,
             is_unsqueeze_target,
             is_dim_transpose_target,
@@ -678,7 +649,6 @@ mod tests {
             is_to_copy_target,
             is_reciprocal_target,
             is_masked_fill_target,
-            is_select_scatter_target,
             is_clamp_target,
             is_abs_target,
             is_comparison_target,
@@ -689,7 +659,6 @@ mod tests {
             is_mean_target,
             is_full_like_target,
             is_batch_norm_target,
-            is_repeat_interleave_self_int_target,
             is_max_pool2d_target,
             is_max_pool2d_with_indices_target,
         ];
@@ -1061,7 +1030,6 @@ mod tests {
         assert_true(is_cat_target, &["aten.cat.default"]);
         assert_true(is_unfold_copy_target, &["aten.unfold_copy.default"]);
         assert_true(is_gather_target, &["aten.gather.default"]);
-        assert_true(is_tril_target, &["aten.tril_copy.default"]);
         assert_true(is_embedding_target, &["aten.embedding.default"]);
         assert_true(is_logit_target, &["aten.logit.default"]);
         assert_true(is_index_select_target, &["aten.index_select.default"]);
@@ -1104,9 +1072,6 @@ mod tests {
             is_pad_target,
             &["aten.pad.default", "aten.constant_pad_nd.default"],
         );
-        assert!(is_pixel_shuffle_target("aten.pixel_shuffle.default"));
-        assert_false(is_pixel_shuffle_target, &["aten.pixel_unshuffle.default"]);
-        assert!(is_pixel_unshuffle_target("aten.pixel_unshuffle.default"));
         assert_true(is_squeeze_target, &["aten.squeeze.dim"]);
         assert_true(is_unsqueeze_target, &["aten.unsqueeze.default"]);
         assert_true(is_dim_transpose_target, &["aten.transpose.int"]);
@@ -1125,7 +1090,6 @@ mod tests {
         assert_false(is_index_put_default_target, &["aten.index.Tensor"]);
         assert_true(is_where_target, &["aten.where.self", "aten_where.self"]);
         assert_true(is_masked_fill_target, &["aten.masked_fill.Scalar"]);
-        assert_true(is_select_scatter_target, &["aten.select_scatter.default"]);
         assert_true(is_clamp_target, &["aten.clamp.default"]);
         assert_false(is_clamp_target, &["aten.clamp.Tensor"]);
     }
@@ -1180,10 +1144,6 @@ mod tests {
                     Some("aten.bitwise_right_shift.Tensor"),
                 ),
             ],
-        );
-        assert_true(
-            is_repeat_interleave_self_int_target,
-            &["aten.repeat_interleave.self_int"],
         );
         assert_true(is_max_pool2d_target, &["aten.max_pool2d.default"]);
         assert_true(

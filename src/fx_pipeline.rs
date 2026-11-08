@@ -8,9 +8,6 @@ use crate::fx_decompose_cumsum_ir;
 use crate::fx_decompose_logit_ir;
 use crate::fx_decompose_masked_fill_ir;
 use crate::fx_decompose_ne_ir;
-use crate::fx_decompose_pixel_shuffle_ir;
-use crate::fx_decompose_repeat_interleave_ir;
-use crate::fx_decompose_tril_ir;
 use crate::fx_remove_noop_ir;
 use crate::fx_replace_inf_values_ir;
 use crate::fx_replace_scalar_with_tensor_ir;
@@ -162,15 +159,11 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
             },
         )),
         Ir(Box::new(
-            crate::fx_decompose_select_scatter_ir::IrDecomposeSelectScatterPass,
-        )),
-        Ir(Box::new(
             crate::fx_decompose_slice_scatter_ir::IrDecomposeSliceScatterPass,
         )),
         Ir(Box::new(
             crate::fx_decompose_strided_slice_ir::IrDecomposeStridedSlicePass,
         )),
-        Ir(Box::new(fx_decompose_tril_ir::IrDecomposeTrilPass)),
         Ir(Box::new(fx_decompose_logit_ir::IrDecomposeLogitPass)),
         Ir(Box::new(fx_decompose_ne_ir::IrDecomposeNotEqualPass)),
         Ir(Box::new(
@@ -182,12 +175,6 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         Ir(Box::new(fx_decompose_addmm_ir::IrDecomposeAddmmPass)),
         Ir(Box::new(fx_decompose_cumsum_ir::IrDecomposeCumsumPass)),
         Ir(Box::new(
-            fx_decompose_repeat_interleave_ir::IrDecomposeRepeatInterleavePass,
-        )),
-        Ir(Box::new(
-            fx_decompose_pixel_shuffle_ir::IrDecomposePixelShufflePass,
-        )),
-        Ir(Box::new(
             fx_decompose_as_strided_copy_ir::IrDecomposeAsStridedCopyPass,
         )),
         Ir(Box::new(
@@ -196,8 +183,8 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         Ir(Box::new(fx_convert_full_like_ir::IrConvertFullLikePass)),
         // APM:664, right after ConvertFullLikeToFull (APM:661); design C3. SELECT gets a
         // `where` mask rank-matched here, which it broadcasts (APU-161). RETAB runs its
-        // avg-pool, var and mean decompositions after this slot, where rc4 runs them
-        // before (critique B9); phase-6 slot 7 rank-matches what they create.
+        // avg-pool and mean decompositions after this slot, where rc4 runs them before
+        // (critique B9); phase-6 slot 7 rank-matches what they create.
         Ir(Box::new(
             crate::layout::match_arg_ranks::IrMatchArgRanksPass,
         )),
@@ -209,15 +196,6 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         // logical_xor reads rank-matched operands.
         Ir(Box::new(
             crate::fx_decompose_bool_equality_ir::IrDecomposeBoolEqualityPass,
-        )),
-        Effectful(Box::new(
-            crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEffectPass,
-        )),
-        Effectful(Box::new(
-            crate::fx_fuse_shape_only_constants_ir::IrFuseShapeOnlyConstantsEffectPass,
-        )),
-        Effectful(Box::new(
-            crate::fx_fuse_constant_inputs_ir::IrFuseConstantInputsEffectPass::matmul_only(),
         )),
         Ir(Box::new(
             crate::fx_decompose_adaptive_avgpool_ir::IrDecomposeAdaptiveAvgPoolPass,
@@ -238,7 +216,6 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         )));
     }
     steps.extend(vec![
-        Ir(Box::new(crate::fx_decompose_var_ir::IrDecomposeVarPass)),
         Ir(Box::new(crate::fx_decompose_mean_ir::IrDecomposeMeanPass)),
         Ir(Box::new(fx_convert_sum_ir::IrConvertBoolSumPass)),
         Ir(Box::new(
@@ -595,6 +572,13 @@ mod tests {
                 assert_eq!(count("IrFuseIdenticalInputTransforms"), 1, "{spec}");
                 assert!(position("IrFuseConsecutiveClamps") < position("IrQuantizeClampArgs"));
 
+                // APM:553-554: DecomposeLayerNorm, then DecomposeVar, once. The var
+                // nodes the layer norm decomposition creates are the only ones a step
+                // creates.
+                let layer_norm = position("IrDecomposeLayerNorm");
+                assert_eq!(names[layer_norm + 1], "IrDecomposeVar", "{spec}");
+                assert_eq!(count("IrDecomposeVar"), 1, "{spec}");
+
                 // The control-flow RESCALE targets, recorded right before the fold
                 // (rc4 reads them at APM:595, from FoldAndAnnotate's annotation).
                 let record = position("IrRecordControlFlowRescaleTargets");
@@ -648,9 +632,19 @@ mod tests {
                 assert!(position("IrInsertTableOpsEp") < size_adjust);
                 assert_eq!(
                     count("IrFuseConstantInputsEp"),
-                    2,
-                    "{spec}: matmul_only twice"
+                    1,
+                    "{spec}: matmul_only once, after phase 6"
                 );
+                // The constant effect passes run only after IrMaterializeConstants,
+                // which folds what they would plan before it under new names.
+                let materialize = position("IrMaterializeConstants");
+                for pass in [
+                    "IrFuseZeroInputConstantsEp",
+                    "IrFuseShapeOnlyConstantsEp",
+                    "IrFuseConstantInputsEp",
+                ] {
+                    assert!(materialize < position(pass), "{spec}: {pass}");
+                }
 
                 // The phase-6 block, once, after the late IrRemoveNoop.
                 let phase6 = position("IrRewriteUpsample");
@@ -709,8 +703,8 @@ mod tests {
     }
 
     /// A `where` whose mask has a lower rank than its operands, through the steps from
-    /// IrDecomposeStridedSlice to the constant effects after IrConvertFullLike, which
-    /// hold IrMatchArgRanks (APM:664). The pipeline only rank-matches the mask, as rc4
+    /// IrDecomposeStridedSlice up to IrDecomposeAdaptiveAvgPool, which hold
+    /// IrMatchArgRanks (APM:664). The pipeline only rank-matches the mask, as rc4
     /// does for SELECT, which broadcasts it, rather than tiling it to the output shape
     /// (APU-161).
     #[test]
@@ -746,7 +740,7 @@ mod tests {
                     .unwrap_or_else(|| panic!("{pass} missing"))
             };
             let start = position("IrDecomposeStridedSlice", 0);
-            let end = position("IrFuseZeroInputConstantsEp", start);
+            let end = position("IrDecomposeAdaptiveAvgPool", start);
             run_steps(&steps[start..end], &mut graph);
             graph
         }
@@ -821,7 +815,7 @@ mod tests {
                     .unwrap_or_else(|| panic!("{pass} missing"))
             };
             let start = position("IrDecomposeStridedSlice", 0);
-            let end = position("IrFuseZeroInputConstantsEp", start);
+            let end = position("IrDecomposeAdaptiveAvgPool", start);
             run_steps(&steps[start..end], &mut graph);
 
             assert!(!graph
