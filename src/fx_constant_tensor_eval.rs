@@ -5,6 +5,7 @@ use crate::fx_ir::{IrArg, IrGraph, IrNode, NodeOp, QParam, TensorSource};
 use crate::fx_target::{shape_only_constant_target, ShapeOnlyConstantTarget};
 use crate::graph::ir::{DType, QuantArgs};
 use crate::lowering_effects::LoweringInputKind;
+use crate::permutation::{is_identity_permutation, permute_by};
 use crate::store::TensorData;
 
 pub fn tensor_numel(shape: &[i64]) -> Option<usize> {
@@ -761,7 +762,7 @@ pub fn permute_tensor_data(input: &TensorData, order: &[usize]) -> Option<Tensor
     if rank != order.len() {
         return None;
     }
-    if order.iter().enumerate().all(|(idx, &axis)| idx == axis) {
+    if is_identity_permutation(order) {
         return Some(input.clone());
     }
     let mut seen = vec![false; rank];
@@ -776,7 +777,7 @@ pub fn permute_tensor_data(input: &TensorData, order: &[usize]) -> Option<Tensor
     if numel.saturating_mul(elem_size) != input.data.len() {
         return None;
     }
-    let new_shape: Vec<i64> = order.iter().map(|&axis| input.shape[axis]).collect();
+    let new_shape = permute_by(&input.shape, order);
     if numel == 0 || elem_size == 0 {
         return Some(TensorData {
             data: input.data.clone(),

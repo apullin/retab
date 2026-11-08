@@ -21,6 +21,7 @@ use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::layout::ctx::LayoutCtx;
 use crate::layout::dim_maps::{is_permutation, normalize_dim, normalize_dims, ViewMap};
 use crate::layout::shape::{int_list, refreshed_meta};
+use crate::permutation::{dims_to_i64, inverse_permutation, is_identity_permutation};
 
 const VIEW: &str = "aten.view_copy.default";
 const PERMUTE: &str = "aten.permute_copy.default";
@@ -176,7 +177,7 @@ fn fuse_sequential_ops(ctx: &mut LayoutCtx<'_>, chain: &mut Vec<NodeId>) -> bool
                     set_node_op(ctx, node, PERMUTE, input, &dims);
                     changed = true;
                 }
-                if dims.iter().enumerate().all(|(index, &dim)| dim == index as i64) {
+                if is_identity_permutation(&dims) {
                     remove_node(ctx, chain, index, input);
                     changed = true;
                     continue;
@@ -279,16 +280,19 @@ fn permute_view_swap(ctx: &LayoutCtx<'_>, permute: NodeId, view: NodeId) -> Opti
     let x_shape = shape(ctx, input_of(ctx, permute));
     let permute_dims = normalize_dims(&permute_dims(ctx, permute), x_shape.len()).ok()?;
     let view_map = view_map(ctx, view)?;
-    let permuted_axis = inverse(&permute_dims);
+    let permuted_axis = inverse_permutation(&permute_dims);
     let target_axis_order = view_map
-        .map_permutation(&to_i64(&permuted_axis))
+        .map_permutation(&dims_to_i64(&permuted_axis))
         .ok()
         .flatten()?;
     let view_shape_before_permute = target_axis_order
         .iter()
         .map(|&axis| view_map.target_shape()[axis])
         .collect();
-    Some((view_shape_before_permute, to_i64(&inverse(&target_axis_order))))
+    Some((
+        view_shape_before_permute,
+        dims_to_i64(&inverse_permutation(&target_axis_order)),
+    ))
 }
 
 /// `_view_permute_swap` (`:341-364`): `view(S).permute(P)` as
@@ -299,7 +303,7 @@ fn view_permute_swap(ctx: &LayoutCtx<'_>, view: NodeId, permute: NodeId) -> Opti
         .map_permutation_inverse(&permute_dims(ctx, permute))
         .ok()
         .flatten()?;
-    Some((to_i64(&mapped), shape(ctx, permute)))
+    Some((dims_to_i64(&mapped), shape(ctx, permute)))
 }
 
 /// `ViewMap(view_node)`, or `None` where rc4 catches an `AssertionError`
@@ -352,18 +356,6 @@ fn set_node_op(ctx: &mut LayoutCtx<'_>, node: NodeId, target: &str, input: NodeI
     ctx.set_args(node, vec![IrArg::Node(input), i64_list_arg(arg)]);
     let meta = refreshed_meta(ctx.graph(), node).expect("views and permutes have a shape rule");
     *ctx.meta_mut(node) = meta;
-}
-
-fn inverse(permutation: &[usize]) -> Vec<usize> {
-    let mut inverse = vec![0; permutation.len()];
-    for (index, &axis) in permutation.iter().enumerate() {
-        inverse[axis] = index;
-    }
-    inverse
-}
-
-fn to_i64(dims: &[usize]) -> Vec<i64> {
-    dims.iter().map(|&dim| dim as i64).collect()
 }
 
 #[cfg(test)]

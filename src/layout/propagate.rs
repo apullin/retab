@@ -157,6 +157,7 @@ use crate::layout::pending::{is_pending_table, merge_table_rescales, split_table
 use crate::layout::pointwise::{is_pointwise, is_transparent_copy};
 use crate::layout::remove_permutes::{remove_permutes_in_ctx, DeadCode, RemovePermutesConfig, RemovePermutesMemo};
 use crate::layout::shape::{has_local_rule, int_list, mark_contiguous, refreshed_meta};
+use crate::permutation::dims_to_i64;
 
 /// `_VIEW_TARGET` (`:59`).
 pub(crate) const VIEW_TARGET: &str = "aten.view_copy.default";
@@ -568,7 +569,7 @@ impl DimArg {
     fn rebuild(&self, mapped: &[usize]) -> IrArg {
         match self {
             Self::Int(_) => IrArg::Int(mapped[0] as i64),
-            Self::List(_) => i64_list_arg(&to_i64(mapped)),
+            Self::List(_) => i64_list_arg(&dims_to_i64(mapped)),
         }
     }
 }
@@ -586,10 +587,6 @@ fn dim_arg(arg: &IrArg) -> Option<DimArg> {
         )),
         _ => None,
     }
-}
-
-fn to_i64(dims: &[usize]) -> Vec<i64> {
-    dims.iter().map(|&dim| dim as i64).collect()
 }
 
 /// One branch of a planned fork split (`_ForkBranchSplit`, `:35-39`).
@@ -1272,7 +1269,7 @@ impl<'c> Propagator<'c> {
             cover("broadcast.project");
             permute_map.project_to_axes(&retained_axes, true)
         }?;
-        Some(with_arg(args, 1, i64_list_arg(&to_i64(&dims))))
+        Some(with_arg(args, 1, i64_list_arg(&dims_to_i64(&dims))))
     }
 
     // -----------------------------------------------------------------------
@@ -1319,7 +1316,7 @@ impl<'c> Propagator<'c> {
                         .unwrap_or_else(|| panic!("ValueError: {dim} is not in list"))
                 })
                 .collect();
-            let node_args = with_arg(&graph.node(node).args, 1, i64_list_arg(&to_i64(&dims)));
+            let node_args = with_arg(&graph.node(node).args, 1, i64_list_arg(&dims_to_i64(&dims)));
             let next_args = with_arg(&next.args, 1, args.rebuild(&mapped));
             cover("up.permute.reduction_dropped");
             return Some((node_args, next_args));
@@ -1378,7 +1375,7 @@ impl<'c> Propagator<'c> {
         let reduction_dims = dim_arg(&next.args[1]).unwrap_or_else(|| panic!("TypeError: reduction dims {:?}", next.args[1]));
         let (new_shape, new_dims) = view_map.map_reduction_after_view(input_shape, &reduction_dims.dims())?;
         cover("up.view.reduction");
-        let next_args = with_arg(&next.args, 1, i64_list_arg(&to_i64(&new_dims)));
+        let next_args = with_arg(&next.args, 1, i64_list_arg(&dims_to_i64(&new_dims)));
         Some((view_args(graph, node, &new_shape), next_args))
     }
 
@@ -1472,7 +1469,7 @@ impl<'c> Propagator<'c> {
         if reduces {
             let retained_axes: Vec<i64> = (0..rank).filter(|dim| !mapped.contains(dim)).map(|dim| dim as i64).collect();
             let dims = permute_map.project_to_axes(&retained_axes, false)?;
-            node_args = with_arg(&node_args, 1, i64_list_arg(&to_i64(&dims)));
+            node_args = with_arg(&node_args, 1, i64_list_arg(&dims_to_i64(&dims)));
         }
         Some((node_args, next_args))
     }
@@ -1501,7 +1498,7 @@ impl<'c> Propagator<'c> {
                 .map_reduction_before_view(&dims.dims())
                 .unwrap_or_else(|error| panic!("AssertionError: {error:?}"))?;
             cover("down.view.reduction");
-            (i64_list_arg(&to_i64(&new_dims)), output_shape)
+            (i64_list_arg(&dims_to_i64(&new_dims)), output_shape)
         } else if next.target == SLICE_COPY {
             let dim = python_int(next_arg(graph, next_node, 1)).unwrap_or_else(|| panic!("TypeError: slice dim"));
             let new_dims = view_map

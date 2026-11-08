@@ -17,6 +17,7 @@
 
 use crate::fx_ir::{IrGraph, IrPass, NodeId, NodeMeta};
 use crate::fx_target::{is_pixel_shuffle_target, is_pixel_unshuffle_target};
+use crate::permutation::{dims_to_i64, permute_by};
 use crate::runner_logging::log_line;
 
 /// Helper: create a view_copy node with the given output shape.
@@ -44,8 +45,8 @@ fn add_permute_copy(
     name: String,
     base_meta: &NodeMeta,
 ) -> NodeId {
-    let permuted_shape: Vec<i64> = perm.iter().map(|&p| input_shape[p]).collect();
-    let perm: Vec<i64> = perm.iter().map(|&p| p as i64).collect();
+    let permuted_shape = permute_by(input_shape, perm);
+    let perm = dims_to_i64(perm);
     graph.add_permute_copy(
         name,
         input_id,

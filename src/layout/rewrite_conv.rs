@@ -169,6 +169,7 @@ use crate::layout::shape::tosa::{
 };
 use crate::layout::shape::{expand_around_channel, permute_shape};
 use crate::lowering_effects::LoweringInputKind;
+use crate::permutation::dims_to_i64;
 use crate::pipeline_config::PipelineConfig;
 use crate::store::TensorData;
 
@@ -568,10 +569,6 @@ fn per_tensor(qparam: &QParam, what: &str) -> Result<(f64, i64), String> {
 
 fn is_float(dtype: &str) -> bool {
     matches!(dtype, "torch.float32" | "torch.float16" | "torch.bfloat16")
-}
-
-fn to_i64(dims: &[usize]) -> Vec<i64> {
-    dims.iter().map(|&dim| dim as i64).collect()
 }
 
 /// Why a conv that `plan` could rewrite must still go to stock when the
@@ -1163,7 +1160,7 @@ fn plan(
     // (HWCM), so per-channel qparams still line up. A captured weight gets the
     // same permute and reshape as runtime ops.
     let shape_error = |error: crate::layout::shape::ShapeError| error.to_string();
-    let weight_dims = to_i64(kind.weight_dims);
+    let weight_dims = dims_to_i64(kind.weight_dims);
     let permuted_weight_shape = permute_shape(&weight_shape, &weight_dims).map_err(shape_error)?;
     if let Some(shape) = &kind.weight_reshape {
         if shape.iter().product::<i64>() != permuted_weight_shape.iter().product::<i64>() {
@@ -1178,7 +1175,7 @@ fn plan(
         .unwrap_or_else(|| permuted_weight_shape.clone());
 
     // The TOSA op's value (RCP:1152-1160): rc4's fake kernels.
-    let pre_dims = to_i64(kind.pre);
+    let pre_dims = dims_to_i64(kind.pre);
     let permuted_shape = permute_shape(&input.shape, &pre_dims).map_err(shape_error)?;
     let tosa_input = input_view_shape.as_deref().unwrap_or(&permuted_shape);
     let list = |index: usize| params[index].as_int_list().expect("an int list");
@@ -1248,7 +1245,7 @@ fn plan(
         shape.remove(1);
         shape
     });
-    let post_dims = to_i64(kind.post);
+    let post_dims = dims_to_i64(kind.post);
     let output_shape = permute_shape(squeeze.as_deref().unwrap_or(&tosa_shape), &post_dims)
         .map_err(shape_error)?;
     if output_shape != output.shape {

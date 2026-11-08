@@ -100,6 +100,7 @@ mod ingest;
 mod ir_golden_tests;
 mod layout;
 mod lowering_effects;
+mod permutation;
 mod pipeline_config;
 mod runner_logging;
 mod serialize;
