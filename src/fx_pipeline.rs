@@ -10,7 +10,6 @@ use crate::fx_decompose_masked_fill_ir;
 use crate::fx_decompose_ne_ir;
 use crate::fx_decompose_pixel_shuffle_ir;
 use crate::fx_decompose_repeat_interleave_ir;
-use crate::fx_decompose_tril_ir;
 use crate::fx_remove_noop_ir;
 use crate::fx_replace_inf_values_ir;
 use crate::fx_replace_scalar_with_tensor_ir;
@@ -153,15 +152,11 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
             },
         )),
         Ir(Box::new(
-            crate::fx_decompose_select_scatter_ir::IrDecomposeSelectScatterPass,
-        )),
-        Ir(Box::new(
             crate::fx_decompose_slice_scatter_ir::IrDecomposeSliceScatterPass,
         )),
         Ir(Box::new(
             crate::fx_decompose_strided_slice_ir::IrDecomposeStridedSlicePass,
         )),
-        Ir(Box::new(fx_decompose_tril_ir::IrDecomposeTrilPass)),
         Ir(Box::new(fx_decompose_logit_ir::IrDecomposeLogitPass)),
         Ir(Box::new(fx_decompose_ne_ir::IrDecomposeNotEqualPass)),
         Ir(Box::new(

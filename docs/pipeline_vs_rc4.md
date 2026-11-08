@@ -34,6 +34,9 @@ the whole list again on each cond and while region.
 - **while region** (`build_ir_while_submodule_pipeline`): the cond list plus two
   steps, so 100 steps (102 on U55).
 
+These are v0.4.1's counts. The steps listed under
+[Removed steps](#removed-steps) have since left all three lists.
+
 The unit test `pipelines_build_rc4s_order_in_parent_and_regions` pins phase 6
 and several of the other slots below. Of rc4's 161 steps, 107 have a RETAB
 step: IrDecomposeOps alone covers 18 of
@@ -46,8 +49,9 @@ runs. The other 54 are listed under
 
 ## Parent pipeline
 
-Numbers are the TOSA-1.0+INT positions, which `RETAB_LOG` prints for that
-spec; "U55" marks the steps only Ethos-U55 gets. **Moved** steps run
+Numbers are the TOSA-1.0+INT positions at v0.4.1, which `RETAB_LOG` printed
+for that spec; "U55" marks the steps only Ethos-U55 gets. The steps removed
+since leave gaps ([Removed steps](#removed-steps)). **Moved** steps run
 away from their rc4 slot ([Order differences](#order-differences-before-phase-6)).
 **RETAB-only** steps are explained in [RETAB-only steps](#retab-only-steps).
 
@@ -81,10 +85,8 @@ away from their rc4 slot ([Order differences](#order-differences-before-phase-6)
 | 29 | IrDecomposeIndexTensor | DecomposeIndexTensorToGatherPass, :643 | U55 mode as rc4. |
 | 30 | IrDecomposeIndexSelect | DecomposeIndexSelectToGatherPass, :639 | |
 | 31 | IrDecomposeUnfold | DecomposeUnfoldToGatherPass, :636 | U55 mode as rc4. |
-| 32 | IrDecomposeSelectScatter | (DecomposeSelectScatterPass, quantizer side, :804) | RETAB-only. |
 | 33 | IrDecomposeSliceScatter | DecomposeSliceScatterPass, :641 | |
 | 34 | IrDecomposeStridedSlice | DecomposeStridedSliceCopyPass, :640 | |
-| 35 | IrDecomposeTril | (DecomposeTrilPass, quantizer side, :817) | RETAB-only. |
 | 36 | IrDecomposeLogit | DecomposeLogitPass, :609 | |
 | 37 | IrDecomposeNotEqual | DecomposeNotEqualPass, :671 | Moved. |
 | 38 | IrReplaceScalarWithTensor | ReplaceScalarWithTensorByProfilePass, :656 | Scalar shifts only; the serializer takes the other scalar operands. |
@@ -250,7 +252,6 @@ crossing a phase boundary.
 |---|---|---:|---|
 | IrRecordControlFlowRescaleTargets (9) | RETAB inserts cond and while boundary RESCALEs at serialization, where rc4 inserts them at :595. This step records each output's target qparams from the quantize after its getitem, before IrFoldQdq folds that quantize. | n/a | Keep. It writes metadata only, so it never reports a change; any graph with a cond or while needs it. |
 | IrReplaceInfAndLimitValues (22) | Replaces ±inf and float32 limits in literal arguments, which rc4 does only on the quantizer side (:881). | 0 | Duplicates RETAB's input contract. Remove with a gate. |
-| IrDecomposeSelectScatter (32), IrDecomposeTril (35) | Decompose select_scatter and tril, which rc4 does only on the quantizer side (:804, :817). | 0 | Can't fire: ExecuTorch's edge decomposition table removes select_scatter and tril, and rc4's partitioner keeps neither. Remove with a gate. |
 | IrDecomposeRepeatInterleave (42), IrDecomposePixelShuffle (43) | Decompose repeat_interleave, pixel_shuffle and pixel_unshuffle; rc4 has no such pass. | 0 | Can't fire, for the same reason: the edge table removes repeat_interleave.self_int, pixel_shuffle and pixel_unshuffle. Remove with a gate. |
 | Constant sweep 1 (48-50) | RETAB's older constant folding. It records MaterializeTensorNode effects, which ingest applies by node name. | 102 | Probably redundant. IrMaterializeConstants (64) re-plans with the same planners and gives each node it folds a new name, which voids the sweep's effect for that node. The sweep fired on 102 sampled graphs and step 64 on 106. An A/B settles it: skip the sweep, then byte-compare the corpus and the op suite. |
 | IrDecomposeVar, second (55) | A second pass over var nodes, left from RETAB's older order. | 0 | Can't fire. IrDecomposeLayerNorm (7) is the only step that creates var nodes, and the first IrDecomposeVar (8) follows it. A var the first leaves has no input shape, and nothing in between gives it one. Remove with a gate. |
@@ -260,11 +261,32 @@ crossing a phase boundary.
 | IrControlFlowOutputGuard (99) | Sends the graph to stock when layout copies hide a control-flow output's boundary target and step 9 recorded none. | n/a | Keep as a guard. It never changes the graph, and it requested no stock fallback in the sample. |
 | IrStripWhileBoundaryQ (while regions) | See [Regions](#regions). | 14 | Keep. |
 
-So, with RETAB's edge fast paths off, five RETAB-only steps can never fire on
-the graphs stock's edge pipeline produces: IrDecomposeSelectScatter,
-IrDecomposeTril, IrDecomposeRepeatInterleave, IrDecomposePixelShuffle and the
-second IrDecomposeVar. Three more fired on no sampled graph:
+So five RETAB-only steps could never fire on the graphs stock's edge pipeline
+produces. IrDecomposeSelectScatter and IrDecomposeTril are removed
+([Removed steps](#removed-steps)); the other three are
+IrDecomposeRepeatInterleave, IrDecomposePixelShuffle and the second
+IrDecomposeVar. Three more fired on no sampled graph:
 IrReplaceInfAndLimitValues and constant sweeps 2 and 3.
+
+### Removed steps
+
+These RETAB-only steps fired on none of the 325 sampled runs, and can't fire,
+so they were removed after v0.4.1. The ops they decomposed never reach RETAB:
+ExecuTorch's edge decomposition table removes them, rc4's partitioner keeps
+none of them (`ops_to_not_decompose`, `backends/arm/tosa/partitioner.py:890`),
+and no RETAB step creates them. RETAB's edge fast paths, which `install()`
+refuses, apply the same table. Should one of these ops reach RETAB anyway, as a
+custom partition op for instance, the serializer stops with "RETAB has no TOSA
+emitter"; rc4 has no backend pass or node visitor for these ops either.
+
+| Step (v0.4.1 #) | Op | Why it can't fire |
+|---|---|---|
+| IrDecomposeSelectScatter (32) | select_scatter | The edge table removes `select_scatter.default`. On INT graphs rc4's quantizer-side DecomposeSelectScatterPass (:804) decomposes it first, so test_select_scatter's tosa_INT cases reach RETAB as arange, eq, expand_copy and where. |
+| IrDecomposeTril (35) | tril | The edge table removes `tril.default`, and on INT graphs rc4's quantizer-side DecomposeTrilPass (:817) decomposes it first. |
+
+Removing them changed no output. The corpus delegates stayed byte-identical,
+and so did the TOSA RETAB produced for each tosa_INT test of the op-test files
+that build these ops: test_select_scatter and test_tril.
 
 ## rc4 steps RETAB has no step for
 
@@ -363,8 +385,9 @@ The third stage is why IrDecomposeLayerNorm, both IrDecomposeVar steps,
 IrDecomposeMean and IrDecomposeOps fired on no sampled graph, not even in
 test_layer_norm, test_var, test_mean_dim, test_group_norm and test_batch_norm.
 rc4's backend copies of those passes have nothing to do there either. RETAB's
-backend pipeline repeats three quantizer-side steps: IrReplaceInfAndLimitValues,
-IrDecomposeSelectScatter and IrDecomposeTril.
+backend pipeline repeats one quantizer-side step, IrReplaceInfAndLimitValues.
+It also repeated IrDecomposeSelectScatter and IrDecomposeTril until they were
+removed ([Removed steps](#removed-steps)).
 
 ## How the firing data was taken
 
