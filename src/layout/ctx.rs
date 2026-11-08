@@ -1051,6 +1051,13 @@ impl<'g> LayoutCtx<'g> {
 /// `ArmOpTargetedPass.should_run_pass` (`backends/arm/_passes/arm_pass.py:295-305`):
 /// whether `graph` has a live call that `is_target` accepts. A targeted pass
 /// leaves a graph without one alone.
+///
+/// rc4 runs some of the callers' passes untargeted:
+/// CanonicalizeViewCopyPermutePass, FuseViewCopyTransformPass,
+/// RewriteUpsamplePass, and RemovePermutesAroundElementwiseOps (the test-only
+/// standalone runner here). For those the check is a shortcut: each of their
+/// sweeps starts at a target node, so a graph without one comes back
+/// unmodified anyway.
 pub(crate) fn has_target_op(graph: &IrGraph, mut is_target: impl FnMut(&IrNode) -> bool) -> bool {
     graph
         .live_call_function_ids()
