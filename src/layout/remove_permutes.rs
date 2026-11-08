@@ -36,12 +36,17 @@
 //! raises. And a region in which a node broadcasts operands of different rank
 //! keeps its permutes, as #24469's guard in the backport stacked on it decides
 //! (`retab/pick-1.6/mixed-rank-broadcast-guard`, 8c5df6f460), since rc4
-//! rewrites it into a differently shaped result. The replay fixtures that
-//! reach either change are generated from the second backport. rc4's region
-//! search defers nested visits onto a stack (`visit`, `:457-485`), which is
-//! not a recursive DFS, and that order decides which permutation a node
-//! reached on two paths gets; [`Detector::visit`] keeps the same stack
-//! discipline.
+//! rewrites it into a differently shaped result. The guard skips TABLE, which
+//! looks each element up in its table and never broadcasts it, as the fix
+//! stacked on that backport has it (`retab/pick-1.6/guard-table-exemption`,
+//! c3172c0028); that fix also keeps only a TABLE's table out of the constant
+//! edges, where rc4 drops every constant input of a TABLE, so a constant data
+//! input is moved into the region's layout like any other constant. The
+//! replay fixtures that reach these changes are generated from that fix.
+//! rc4's region search defers nested visits onto a stack (`visit`,
+//! `:457-485`), which is not a recursive DFS, and that order decides which
+//! permutation a node reached on two paths gets; [`Detector::visit`] keeps
+//! the same stack discipline.
 //!
 //! Users are visited in torch.fx's order, as rc4 iterates `node.users`
 //! (`:433`, `:566`), which the ctx tracks (`LayoutCtx::users_in_fx_order`).
@@ -62,15 +67,17 @@
 //!
 //! - **TABLE.** rc4 has already replaced quantized table ops with
 //!   `TABLE(x, table)` (`layout::pending`). The TOSA subclass drops the table's
-//!   constant edge (`:45-54`), so a pending table differs from its TABLE only
-//!   where that rank-1 table input is read: the visit's constant-rank check,
-//!   which fails a rank-0 region (`:631-637`; [`Detector::visit_one`]), and
-//!   the mixed-rank guard, which exempts constant edges but not the dropped
-//!   one, so it rejects a region whose TABLE reads an input of rank 2 or more
-//!   with more than one element ([`permute_subgraph`]). The port applies both.
-//!   The replay fixtures whose generator hands rc4 the op itself, before any
-//!   TABLE is inserted, replay the port with a test hook under which a pending
-//!   table is that plain op (`RemovePermutesConfig::before_table_insertion`).
+//!   constant edge (`:53-65` of c3172c0028), so that the table, which TABLE
+//!   indexes by value, is not reshaped or permuted into the region's layout,
+//!   and the mixed-rank guard skips TABLE, which never broadcasts its table
+//!   (`_NON_BROADCASTING_OPS`; [`RemovePermutesConfig::is_non_broadcasting_op`]);
+//!   a pending table reads a single tensor, which the guard passes anyway. A
+//!   pending table therefore differs from its TABLE only in the visit's
+//!   constant-rank check on that rank-1 table input, which fails a rank-0
+//!   region (`:631-637`); [`Detector::visit_one`] applies that check. The
+//!   replay fixtures whose generator hands rc4 the op itself, before any TABLE
+//!   is inserted, replay the port with a test hook under which a pending table
+//!   is that plain op (`RemovePermutesConfig::before_table_insertion`).
 //! - **Constants.** rc4's subclass reads parameters, buffers and lifted
 //!   constants from the graph signature (`:30-43`); in RETAB those
 //!   placeholders carry tensor data, which the port reads instead. The base
@@ -238,7 +245,9 @@ pub(crate) type TargetFilter = fn(&IrGraph, NodeId) -> bool;
 pub(crate) struct RemovePermutesConfig {
     /// `RemovePermutesAroundElementwiseTosaOps`: TABLE ops, RESCALE and TABLE
     /// are permutable (`:19-26`), graph-signature constants count as constants
-    /// (`:40-43`) and TABLE's constant edges are dropped (`:45-54`).
+    /// (`:40-43`), and, as in c3172c0028, TABLE does not broadcast (`:18-24`
+    /// there) and a TABLE's table is dropped from the constant edges
+    /// (`:53-65` there; rc4's `:45-54` drop every constant input of a TABLE).
     pub(crate) tosa: bool,
     pub(crate) extra_permutable_ops: Vec<&'static str>,
     pub(crate) target_filters: Vec<(&'static str, TargetFilter)>,
@@ -289,6 +298,15 @@ impl RemovePermutesConfig {
             .iter()
             .find(|(filtered, _)| same_target(filtered, target))
             .map(|&(_, filter)| filter)
+    }
+
+    /// `node.target in self._NON_BROADCASTING_OPS`, the ops the mixed-rank
+    /// guard skips because they never broadcast their operands against each
+    /// other: cat in the base pass (`:754-758` of c3172c0028), and TABLE too
+    /// in the subclass (`:18-24` there), which looks each element up in its
+    /// rank-1 table.
+    fn is_non_broadcasting_op(&self, target: &str) -> bool {
+        target == CAT || (self.tosa && is_tosa_table_target(target))
     }
 
     /// Whether `node` stands for a `TABLE(x, table)` that rc4 has inserted
@@ -1753,8 +1771,10 @@ struct Rewrite {
     unused: Vec<NodeId>,
 }
 
-/// `permute_subgraph` (`:753-885`), after the subclass drops TABLE's constant
-/// edges (`remove_permutes_around_elementwise_tosa_ops.py:45-54`).
+/// `permute_subgraph` (`:753-885`), after the subclass drops each TABLE's
+/// table from the constant edges
+/// (`remove_permutes_around_elementwise_tosa_ops.py:53-65` of c3172c0028;
+/// rc4's `:45-54` drop every constant input of a TABLE).
 fn permute_subgraph(
     ctx: &mut LayoutCtx<'_>,
     config: &RemovePermutesConfig,
@@ -1762,9 +1782,11 @@ fn permute_subgraph(
     rewrite: &mut Rewrite,
 ) -> bool {
     if config.tosa {
-        subgraph
-            .constant_edges_in
-            .retain(|&(_, user)| !is_tosa_table_target(&ctx.node(user).target));
+        subgraph.constant_edges_in.retain(|&(constant, user)| {
+            let user = ctx.node(user);
+            !(is_tosa_table_target(&user.target)
+                && user.args.get(1).and_then(IrArg::as_node) == Some(constant))
+        });
     }
     if !subgraph_edges_are_current(ctx, config, subgraph, &rewrite.bypassed) {
         return false;
@@ -1803,29 +1825,30 @@ fn permute_subgraph(
             }
         }
     }
-    // #24469: no node may broadcast operands of different rank (`:795-826` of
-    // the release/1.6 backport). Broadcasting right-aligns shapes, so once the
-    // permutes are gone a lower-rank operand lines up against other dims and
-    // the region computes a differently shaped result. Numel-1 operands
-    // broadcast the same under any permutation, cat never broadcasts, and
-    // constant edges are moved into the region's layout below (#24315). The
-    // subclass has dropped TABLE's table edge, so the table counts: a pending
-    // table brings the rank 1 of the table rc4's TABLE reads.
+    // #24469: no node may broadcast operands of different rank (`:801-832` of
+    // the release/1.6 backports, at c3172c0028). Broadcasting right-aligns
+    // shapes, so once the permutes are gone a lower-rank operand lines up
+    // against other dims and the region computes a differently shaped result.
+    // Numel-1 operands broadcast the same under any permutation, the
+    // non-broadcasting ops never broadcast, and constant edges are moved into
+    // the region's layout below (#24315). TABLE's table edge, which the
+    // subclass has dropped, is not counted, since TABLE is skipped; a pending
+    // table reads only its input.
     for &node in subgraph.nodes.iter() {
         let target = ctx.node(node).target.as_str();
-        if interleave_nodes.contains(&node) || VIEW_OPS.contains(&target) || target == CAT {
+        if interleave_nodes.contains(&node)
+            || VIEW_OPS.contains(&target)
+            || config.is_non_broadcasting_op(target)
+        {
             continue;
         }
-        let mut ranks: HashSet<usize> = all_input_nodes(ctx.node(node))
+        let ranks: HashSet<usize> = all_input_nodes(ctx.node(node))
             .into_iter()
             .filter(|&input| !subgraph.constant_edges_in.contains(&(input, node)))
             .filter_map(|input| ctx.graph().node_shape(input))
             .filter(|shape| shape.iter().product::<i64>() > 1)
             .map(<[i64]>::len)
             .collect();
-        if config.is_inserted_table(ctx.node(node)) {
-            ranks.insert(1);
-        }
         if ranks.len() > 1 {
             return false;
         }

@@ -4,15 +4,15 @@
 //! So must every case of tests/fixtures/layout_replay/remove_permutes_user_order.txt,
 //! whose graphs have users out of graph order. Both fixtures record rc4 with
 //! the release/1.6 backports of #24315 and of #24469's mixed-rank broadcast
-//! guard, which the port follows (see the generator's docstring).
+//! guard, and the fix that keeps the guard from counting a TABLE's table,
+//! which the port follows (see the generator's docstring).
 //!
 //! The generator hands rc4's pass a quantized table op as the op itself: it
 //! runs no InsertTableOpsPass, so rc4 sees no TABLE and no rank-1 table there.
 //! In the pipeline the subclass runs after InsertTableOpsPass, and the port
 //! reads a pending table as the TABLE rc4 has by then (`layout::pending`),
-//! whose table fails a rank-0 region and trips the guard in a region of rank
-//! 2 or more. So the fixtures replay the port with its `before_table_insertion`
-//! hook, under which a pending table is the plain op.
+//! whose table fails a rank-0 region. So the fixtures replay the port with its
+//! `before_table_insertion` hook, under which a pending table is the plain op.
 //! `a_pending_table_is_the_table_rc4_has_inserted` checks the pipeline's
 //! reading on the fixture's hand cases, and the propagation fixtures check it
 //! against rc4, since their generator runs the real InsertTableOpsPass first.
@@ -118,13 +118,13 @@ fn remove_permutes_around_elementwise_matches_rc4() {
 }
 
 /// rc4 runs this pass after `InsertTableOpsPass`, so a quantized table op is
-/// a `TABLE(x, table)` there, and the port leaves the fixture's two
-/// pending-table cases as rc4 leaves their TABLE twins. The guard keeps
-/// `pending_table_region`'s permutes, as it keeps those of
-/// `table_constant_edge_is_dropped`, since the subclass drops the table's
-/// constant edge. And the visit's constant check fails
+/// a `TABLE(x, table)` there, and the port treats the fixture's two
+/// pending-table cases as rc4 treats their TABLE twins. The guard skips TABLE,
+/// so rc4 rewrites `table_constant_edge_is_dropped`, whose table edge the
+/// subclass drops, and the port rewrites `pending_table_region` exactly as
+/// rc4 rewrites the plain op. The visit's constant check fails
 /// `pending_table_in_a_rank0_region` on the rank-1 table, as it fails
-/// `table_in_a_rank0_region_fails`. rc4, handed the plain op, rewrites both.
+/// `table_in_a_rank0_region_fails`, though rc4 rewrites the plain op there.
 #[test]
 fn a_pending_table_is_the_table_rc4_has_inserted() {
     let cases = replay::parse(FIXTURE).expect("the fixture parses");
@@ -134,21 +134,31 @@ fn a_pending_table_is_the_table_rc4_has_inserted() {
             .find(|case| case.name == name)
             .unwrap_or_else(|| panic!("no case {name}"))
     };
-    for (pending, table) in [
-        ("pending_table_region", "table_constant_edge_is_dropped"),
-        (
-            "pending_table_in_a_rank0_region",
-            "table_in_a_rank0_region_fails",
-        ),
-    ] {
-        assert!(!case(table).modified, "rc4 rewrites {table}");
-        assert!(case(pending).modified, "rc4 handed the op leaves {pending}");
-        let mut graph = replay::build(&case(pending).before);
-        assert!(
-            !IrRemovePermutesAroundElementwiseTosaOpsPass.run(&mut graph),
-            "the port rewrites {pending}"
-        );
-    }
+    let pass = IrRemovePermutesAroundElementwiseTosaOpsPass;
+
+    assert!(
+        case("table_constant_edge_is_dropped").modified,
+        "rc4 leaves the TABLE region"
+    );
+    assert!(
+        case("pending_table_region").modified,
+        "rc4 handed the op leaves it"
+    );
+    let options = Options {
+        modified: true,
+        ..Options::default()
+    };
+    let result = replay::replay_case(&pass, case("pending_table_region"), options);
+    assert!(result.mismatch.is_none(), "{}", result.report);
+
+    let (pending, table) = (
+        "pending_table_in_a_rank0_region",
+        "table_in_a_rank0_region_fails",
+    );
+    assert!(!case(table).modified, "rc4 rewrites {table}");
+    assert!(case(pending).modified, "rc4 handed the op leaves {pending}");
+    let mut graph = replay::build(&case(pending).before);
+    assert!(!pass.run(&mut graph), "the port rewrites {pending}");
 }
 
 /// rc4 eliminates dead code only when it rewrote something, and so does the

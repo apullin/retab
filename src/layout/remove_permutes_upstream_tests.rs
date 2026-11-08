@@ -2,7 +2,7 @@
 //! `RemovePermutesAroundElementwiseTosaOps` (APU-158):
 //!
 //! - `backends/arm/test/passes/test_remove_permutes_around_elementwise_tosa_ops.py`
-//!   (8 tests), run with the TOSA configuration unless the test builds the
+//!   (10 tests), run with the TOSA configuration unless the test builds the
 //!   base pass;
 //! - the remove-permutes tests of
 //!   `backends/transforms/test/test_permute_optimization_passes.py`
@@ -11,13 +11,16 @@
 //!   47 tests), run with the base pass as rc4 constructs it there.
 //!
 //! The sources are rc4 with the release/1.6 backports of #24315 and of
-//! #24469's mixed-rank broadcast guard (fork branch
-//! `retab/pick-1.6/mixed-rank-broadcast-guard`, 8c5df6f460), whose fixes the
-//! port follows. They add four of those tests: #24315's
-//! `test_lower_rank_constant_is_transposed_into_region_layout`, #24469's
-//! `test_numel_one_operand_does_not_block_region` and
-//! `test_cat_with_different_concat_sizes_does_not_block_region`, and the
-//! backport's `test_squeezed_lower_rank_operand_blocks_region`. Each test
+//! #24469's mixed-rank broadcast guard, and the fix stacked on them that keeps
+//! the guard from counting a TABLE's table and keeps only that table out of
+//! the constant edges (fork branch `retab/pick-1.6/guard-table-exemption`,
+//! c3172c0028), whose fixes the port follows. They add six of those tests:
+//! #24315's `test_lower_rank_constant_is_transposed_into_region_layout`,
+//! #24469's `test_numel_one_operand_does_not_block_region` and
+//! `test_cat_with_different_concat_sizes_does_not_block_region`, the guard
+//! backport's `test_squeezed_lower_rank_operand_blocks_region`, and the fix's
+//! `test_remove_permutes_around_rms_norm_with_table_tosa_INT` and
+//! `test_remove_permutes_around_table_with_constant_input_tosa_INT`. Each test
 //! replays the calls its ExecuTorch test made, recorded in
 //! tests/fixtures/remove_permutes_upstream/rc4_test_calls.txt by running the
 //! test there with the pass instrumented (see the recorder's docstring): the
@@ -203,6 +206,50 @@ fn remove_permutes_around_amax_reduction_region_tosa_int() {
     assert_eq!(count(&graph, PERMUTE), 0);
     let maximum = live_calls(&graph, "aten.amax.default")[0];
     assert_eq!(graph.node(maximum).args[1].as_int(), Some(1));
+}
+
+/// `test_remove_permutes_around_rms_norm_with_table_tosa_INT`, the test of the
+/// fix that keeps the mixed-rank guard from counting a TABLE's table: an int8
+/// RMS norm between a permute and its inverse, whose rsqrt is a TABLE. Its
+/// rank-1 table is no broadcast operand, so both permutes go, the sum's dim
+/// follows the layout, and the TABLE keeps its input and its table as they
+/// are. Without the fix the guard kept both permutes.
+#[test]
+fn remove_permutes_around_rms_norm_with_table_tosa_int() {
+    let (graph, modified) = tosa("test_remove_permutes_around_rms_norm_with_table_tosa_INT#0");
+    assert!(modified);
+    assert_eq!(count(&graph, PERMUTE), 0);
+    assert_eq!(count(&graph, VIEW), 0);
+    // `sum_of_squares`, `table_input` and `rsqrt` are %5, %6 and %7 in the
+    // recorded graph.
+    assert_eq!(int_list(&graph, named(&graph, "n5"), 1), [3]);
+    assert_eq!(
+        node_args(&graph, named(&graph, "n7")),
+        [named(&graph, "n6"), named(&graph, "b_rsqrt_table_constant")]
+    );
+}
+
+/// `test_remove_permutes_around_table_with_constant_input_tosa_INT`, the
+/// fix's test that only a TABLE's table keeps its layout: a mul between a
+/// permute and its inverse reads a TABLE whose data input is a constant. The
+/// data input gets the region's compensating permute, the one permute left,
+/// and the TABLE keeps its table. rc4 drops every constant input of a TABLE,
+/// so once the guard skips TABLE, the mul read the data input in the old
+/// layout and rc4's retrace raised.
+#[test]
+fn remove_permutes_around_table_with_constant_input_tosa_int() {
+    let (graph, modified) =
+        tosa("test_remove_permutes_around_table_with_constant_input_tosa_INT#0");
+    assert!(modified);
+    assert_eq!(count(&graph, PERMUTE), 1);
+    // `gate`, the TABLE, is %4 in the recorded graph.
+    let gate = node_args(&graph, named(&graph, "n4"));
+    assert_eq!(gate.len(), 2);
+    let state_permute = gate[0];
+    assert_eq!(graph.node(state_permute).target, PERMUTE);
+    assert_eq!(node_args(&graph, state_permute), [named(&graph, "b_state")]);
+    assert_eq!(int_list(&graph, state_permute, 1), [0, 2, 3, 1]);
+    assert_eq!(gate[1], named(&graph, "b_sigmoid_table_constant"));
 }
 
 /// `test_remove_permutes_around_gelu_with_folded_scalar_constants_tosa_FP`:
@@ -547,6 +594,8 @@ fn every_recorded_call_is_ported() {
         "test_terminal_sink_view_broadcast_is_optimized_tosa_INT",
         "test_remove_permutes_around_singleton_view_and_gate_region_tosa_INT",
         "test_remove_permutes_around_amax_reduction_region_tosa_INT",
+        "test_remove_permutes_around_rms_norm_with_table_tosa_INT",
+        "test_remove_permutes_around_table_with_constant_input_tosa_INT",
         "test_remove_permutes_around_gelu_with_folded_scalar_constants_tosa_FP",
         "test_remove_permutes_skips_stale_shared_boundary_subgraph_tosa_FP",
         "test_permute_view_squeeze_elementwise_view_unsqueeze_permute",
@@ -597,7 +646,7 @@ fn every_recorded_call_is_ported() {
         "test_squeezed_lower_rank_operand_blocks_region",
         "test_inverse_layout_copy_pair_around_elementwise_is_removed",
     ];
-    assert_eq!(ported.len(), 55);
+    assert_eq!(ported.len(), 57);
     for case in replay::parse(CALLS).expect("the recorded calls parse") {
         let test = case.name.split('#').next().unwrap_or_default();
         assert!(ported.contains(&test), "recorded call {} is not ported", case.name);
