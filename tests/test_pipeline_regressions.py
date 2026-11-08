@@ -341,6 +341,74 @@ def test_bool_eq_of_constants_folds_to_one_constant_tosa_INT():
     assert constant.DataAsNumpy().tolist() == [1, 0, 1, 0, 1, 0, 1, 0, 1]
 
 
+class ComparisonEqualsTrue(torch.nn.Module):
+    def forward(self, value):
+        return (value > 0.5) == True  # noqa: E712
+
+
+def test_quantized_bool_eq_of_a_comparison_lowers_as_logical_xor_then_not_tosa_INT():
+    """rc4's quantizer makes the `True` a bool `full` and annotates the eq. rc4 gives
+    the eq no qparams, since neither operand comes from a DQ; RETAB took the gt's
+    int8 input qparams for the eq's bool operand, rescaled it to INT32 and left an
+    EQUAL on INT32 and bool, which the reference model rejects (APU-123)."""
+    from executorch.backends.arm.quantizer import (
+        TOSAQuantizer,
+        get_symmetric_quantization_config,
+    )
+    from executorch.backends.arm.tosa.partitioner import TOSAPartitioner
+    from executorch.exir import EdgeCompileConfig, to_edge_transform_and_lower
+    from executorch.exir.lowered_backend_module import LoweredBackendModule
+    from torchao.quantization.pt2e.quantize_pt2e import convert_pt2e, prepare_pt2e
+
+    from retab.integration.executorch_arm import activated
+    from retab.preprocess import preprocess_stats
+
+    inputs = (torch.linspace(0.0, 1.0, 24).reshape(2, 3, 4),)
+    compile_spec = TosaCompileSpec("TOSA-1.0+INT")
+    quantizer = TOSAQuantizer(compile_spec)
+    quantizer.set_global(get_symmetric_quantization_config())
+    module = prepare_pt2e(
+        torch.export.export(ComparisonEqualsTrue(), inputs, strict=True).module(), quantizer
+    )
+    module(*inputs)
+    program = torch.export.export(convert_pt2e(module), inputs, strict=True)
+    before = preprocess_stats()
+    with activated():
+        edge = to_edge_transform_and_lower(
+            program,
+            partitioner=[TOSAPartitioner(compile_spec)],
+            compile_config=EdgeCompileConfig(_check_ir_validity=False),
+        )
+    after = preprocess_stats()
+    assert after["retab"] == before["retab"] + 1
+    assert after["stock_fallback"] == before["stock_fallback"]
+
+    (lowered,) = (
+        child
+        for child in edge.exported_program().graph_module.children()
+        if isinstance(child, LoweredBackendModule)
+    )
+    data = bytes(lowered.processed_bytes)
+    graph = TosaGraph.TosaGraph.GetRootAs(bytearray(data), 0)
+    ops = _main_ops(graph)
+    assert Op.Op.EQUAL not in ops
+    assert ops[-3:] == [Op.Op.GREATER, Op.Op.LOGICAL_XOR, Op.Op.LOGICAL_NOT]
+
+    block = graph.Regions(0).Blocks(0)
+    (name,) = (block.Inputs(i) for i in range(block.InputsLength()))
+    (tensor,) = (
+        block.Tensors(i) for i in range(block.TensorsLength()) if block.Tensors(i).Name() == name
+    )
+    assert tensor.Type() == DType.DType.INT8
+    shape = [tensor.Shape(i) for i in range(tensor.ShapeLength())]
+    codes = np.arange(-128, -128 + int(np.prod(shape)) * 10, 10, dtype=np.int8).reshape(shape)
+    outputs, status = reference_model.run(
+        data, [codes], initialize_variable_tensor_from_numpy=True
+    )
+    assert status == reference_model.GraphStatus.TOSA_VALID
+    assert outputs[0].dtype == np.bool_
+
+
 class NegativePad(torch.nn.Module):
     def __init__(self, constant_pad_nd):
         super().__init__()

@@ -112,12 +112,25 @@ fn resolve_qparam_from_q_or_dq(graph: &IrGraph, node: &IrNode) -> Option<Resolve
     resolve_qparam_from_q_or_dq_args(&node.target, &node.args, &mut tensor_lookup)
 }
 
+/// An argument's qparams: its Q or DQ node's, or else its producer's from meta.
+///
+/// A bool producer gives none. rc4 takes an input's qparams from its DQ alone
+/// (`FoldAndAnnotateQParamsPass._extract_input_params`), and a bool value is
+/// never quantized, but a comparison's meta holds its own input qparams. A
+/// quantized `(x > 0.5) == True` made its eq take the gt's int8 input
+/// qparams that way, so IrInsertInt32Rescale rescaled the eq's bool operand
+/// and IrDecomposeBoolEquality left an EQUAL on INT32 and bool (APU-123).
 fn resolve_qparam_from_arg(graph: &IrGraph, arg: &IrArg) -> Option<ResolvedFoldQdqQParam> {
     let IrArg::Node(id) = arg else {
         return None;
     };
     let node = graph.node(*id);
-    resolve_qparam_from_q_or_dq(graph, node).or_else(|| resolve_qparam_from_node_meta(node))
+    resolve_qparam_from_q_or_dq(graph, node).or_else(|| {
+        if node.meta.val_dtype() == Some("torch.bool") {
+            return None;
+        }
+        resolve_qparam_from_node_meta(node)
+    })
 }
 
 /// `first_list_qparam`: a list argument takes its first dequantized item's qparams
@@ -771,6 +784,78 @@ mod tests {
         assert!(matches!(graph.node(add).args[0], IrArg::Node(id) if id == input));
         assert_eq!(graph.node(add).meta.input_qparam().unwrap().scale, 0.25);
         assert_eq!(graph.node(add).meta.output_qparam().unwrap().zp, 3);
+    }
+
+    /// A quantized `(x > 0.5) == True` (rc4's quantizer makes the scalar a
+    /// bool `full`): the gt takes its DQs' qparams, and the eq, whose operands
+    /// are bool, takes none, as in rc4. A non-bool producer's meta still
+    /// gives its qparams.
+    #[test]
+    fn a_bool_operand_gives_no_qparams() {
+        let mut graph = IrGraph::empty();
+        let x = placeholder(&mut graph, "x");
+        let dq = qdq_node(
+            &mut graph,
+            "dq",
+            "quantized_decomposed.dequantize_per_tensor.default",
+            int8_qdq_args(x, 0.25, 3),
+        );
+        let mut gt_meta = annotated_meta();
+        gt_meta.set_tensor_facts(crate::fx_meta::TensorFacts::new(vec![4], "torch.bool"));
+        let gt = add_node(
+            &mut graph,
+            NodeOp::CallFunction,
+            "gt",
+            "aten.gt.Tensor",
+            vec![IrArg::Node(dq), IrArg::Node(dq)],
+            gt_meta,
+        );
+        let full = add_node(
+            &mut graph,
+            NodeOp::CallFunction,
+            "full",
+            "aten.full.default",
+            vec![IrArg::List(vec![IrArg::Int(1)]), IrArg::Float(1.0)],
+            NodeMeta::tensor(vec![1], "torch.bool"),
+        );
+        let eq = add_node(
+            &mut graph,
+            NodeOp::CallFunction,
+            "eq",
+            "aten.eq.Tensor",
+            vec![IrArg::Node(gt), IrArg::Node(full)],
+            annotated_meta(),
+        );
+        let mut relu_meta = annotated_meta();
+        relu_meta.set_single_input_qparam(QParam::per_tensor(
+            0.5,
+            0,
+            -128,
+            127,
+            "torch.int8".to_string(),
+        ));
+        let relu = add_node(
+            &mut graph,
+            NodeOp::CallFunction,
+            "relu",
+            "aten.relu.default",
+            vec![IrArg::Node(x)],
+            relu_meta,
+        );
+        let view = add_node(
+            &mut graph,
+            NodeOp::CallFunction,
+            "view",
+            "aten.view_copy.default",
+            vec![IrArg::Node(relu)],
+            annotated_meta(),
+        );
+        output(&mut graph, eq);
+
+        assert!(IrFoldQdqPass::new().run(&mut graph));
+        assert_eq!(graph.node(gt).meta.input_qparam_at(0).unwrap().scale, 0.25);
+        assert!(graph.node(eq).meta.input_qparams().is_none());
+        assert_eq!(graph.node(view).meta.input_qparam().unwrap().scale, 0.5);
     }
 
     #[test]
