@@ -35,6 +35,12 @@ pub(crate) fn retab_debug_enabled() -> bool {
     *ENABLED.get_or_init(|| env_is_set("RETAB_DEBUG"))
 }
 
+/// Test hook: the name of the Python entry point that panics on entry, so tests can
+/// check that a panic falls back to stock. Read on every call.
+pub(crate) fn test_panic_entry_point() -> Option<String> {
+    std::env::var("RETAB_TEST_PANIC").ok()
+}
+
 pub(crate) fn table_debug_enabled() -> bool {
     env_is_set("RETAB_TABLE_DEBUG")
 }

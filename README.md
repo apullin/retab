@@ -139,7 +139,10 @@ It hands these cases to stock preprocessing:
 - delegate-owned mutable buffers;
 - symbolic tensor shapes;
 - graphs a Rust pass hands back: inputs on which stock raises its own error,
-  or that RETAB can't lower.
+  or that RETAB can't lower;
+- graphs on which RETAB's Rust code panics, which is a RETAB bug. The
+  fallback reason is `Rust panic`, and a warning gives the panic's message
+  and location. Set `RETAB_DEBUG` to raise the panic instead.
 
 ## Development
 

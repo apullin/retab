@@ -489,6 +489,12 @@ def _native_fallback_reason(exc: Exception) -> str | None:
     return rest.strip().split(":", 1)[0]
 
 
+# The reason of a panic in RETAB's Rust code, which each Rust entry point turns into a
+# stock fallback (src/stock_fallback.rs: catch_panic). Unlike the other reasons it is a
+# RETAB bug, not a graph outside RETAB's scope.
+_RUST_PANIC_REASON = "Rust panic"
+
+
 def _all_rust_preprocess(
     edge_program: ExportedProgram,
     _compile_spec: TosaCompileSpec,
@@ -497,7 +503,8 @@ def _all_rust_preprocess(
 
     run_fx_passes() reads the FX graph and state_dict without modifying them and
     stashes the lowered IR (plus one IR per cond/while region); ingest_and_serialize()
-    serializes that stash. Graphs outside RETAB's scope go to stock _preprocess.
+    serializes that stash. Graphs outside RETAB's scope go to stock _preprocess, and so
+    does a graph on which RETAB's Rust code panics (logged as a warning).
     """
     reason = stock_fallback_reason(edge_program, _compile_spec)
     if reason is not None:
@@ -513,6 +520,7 @@ def _all_rust_preprocess(
     pipeline_config = _build_pipeline_config(_compile_spec)
     # The U55 split judges the permutes alive at its slot, as rc4 does.
     u55_transpose_probe = _u55_transpose_probe(_compile_spec)
+    # Rust requests stock with a RETAB_STOCK_FALLBACK error, also for a panic.
     try:
         _rust.run_fx_passes(
             gm,
@@ -521,29 +529,26 @@ def _all_rust_preprocess(
             u55_transpose_probe=u55_transpose_probe,
         )
         _run_control_flow_submodule_rust_passes(gm, edge_program, _rust, pipeline_config)
-    except Exception as exc:  # noqa: BLE001 - Rust requests stock via message
-        reason = _native_fallback_reason(exc)
-        if reason is None:
-            raise
-        _stock_fallback_counts[reason] += 1
-        logger.info("[retab] stock preprocess fallback: %s", exc)
-        return stock_preprocess(edge_program, _compile_spec)
-    t_passes = time.perf_counter() - t0
-
-    try:
+        t_passes = time.perf_counter() - t0
         tosa_bytes = _rust.ingest_and_serialize()
+        unused = _rust.last_unused_inputs() if getattr(_ethos_u_context, "depth", 0) else []
     except Exception as exc:  # noqa: BLE001 - Rust requests stock via message
         reason = _native_fallback_reason(exc)
         if reason is None:
             raise
         _stock_fallback_counts[reason] += 1
-        logger.info("[retab] stock preprocess fallback: %s", exc)
+        if reason == _RUST_PANIC_REASON:
+            logger.warning(
+                "[retab] stock preprocess fallback: %s. This is a RETAB bug; run with "
+                "RETAB_DEBUG set to raise the panic instead.",
+                exc,
+            )
+        else:
+            logger.info("[retab] stock preprocess fallback: %s", exc)
         return stock_preprocess(edge_program, _compile_spec)
     _preprocess_counts["retab"] += 1
-    if getattr(_ethos_u_context, "depth", 0):
-        unused = _rust.last_unused_inputs()
-        if unused:
-            raise RuntimeError(_UNUSED_INPUT_MESSAGE.format(unused))
+    if unused:
+        raise RuntimeError(_UNUSED_INPUT_MESSAGE.format(unused))
 
     _maybe_dump_tosa_artifacts(edge_program, _compile_spec, tosa_bytes)
 
