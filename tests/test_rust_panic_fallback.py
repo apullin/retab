@@ -11,6 +11,7 @@ import logging
 import os
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -150,7 +151,10 @@ def test_a_graph_retab_panics_on_gets_stocks_own_error():
     after = rp.preprocess_stats()
     assert "DecomposeIndexSelectToGatherPass" in str(raised.value)
     assert after["retab"] == before["retab"]
-    assert sum(after["stock_fallback"].values()) == sum(before["stock_fallback"].values()) + 1
+    # The one fallback is the panic's. If the pass ever requests a stock fallback here
+    # instead, this test no longer covers a panic in a real pass and needs another model.
+    fallbacks = Counter(after["stock_fallback"]) - Counter(before["stock_fallback"])
+    assert fallbacks == {"Rust panic": 1}
 
 
 def test_retab_debug_lets_the_panic_propagate():
