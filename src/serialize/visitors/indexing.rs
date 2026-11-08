@@ -102,31 +102,12 @@ impl ParsedSliceSpec {
             };
         }
 
-        let raw_dim = arg_i64(node, 1, 0);
-        let rank = input_shape.len() as i64;
-        let raw_dim = if raw_dim < 0 { raw_dim + rank } else { raw_dim };
-        let dim = raw_dim.clamp(0, rank.saturating_sub(1)) as usize;
-        let start = arg_i64(node, 2, 0);
-        let end = arg_i64(node, 3, input_shape.get(dim).copied().unwrap_or(0) as i64);
-        let step = arg_i64(node, 4, 1);
-        let input_dim = input_shape.get(dim).copied().unwrap_or(0) as i64;
-        let start_idx = if start < 0 {
-            (input_dim + start).max(0)
-        } else {
-            start.min(input_dim)
-        };
-        let mut end_idx = if end < 0 { input_dim + end } else { end };
-        end_idx = end_idx.clamp(start_idx, input_dim);
-        let slice_len = if step == 1 {
-            (end_idx - start_idx).max(0)
-        } else {
-            ((end_idx - start_idx).max(0) + step - 1) / step
-        };
-
+        let window = slice_window(node, &input_shape)
+            .expect("a dim clamped into a non-empty shape indexes it");
         let mut start_shape = vec![0; input_shape.len()];
-        start_shape[dim] = start_idx as i32;
+        start_shape[window.dim] = window.start_index as i32;
         let mut size_shape = input_shape.clone();
-        size_shape[dim] = slice_len as i32;
+        size_shape[window.dim] = window.len as i32;
 
         let input_target = input_node
             .map(|n| format!("{:?}", n.target))
@@ -135,10 +116,10 @@ impl ParsedSliceSpec {
         Self {
             input_name,
             input_shape,
-            dim,
-            start,
-            end,
-            step,
+            dim: window.dim,
+            start: window.start,
+            end: window.end,
+            step: window.step,
             start_shape,
             size_shape,
             input_target,

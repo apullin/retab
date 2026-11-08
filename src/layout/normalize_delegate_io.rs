@@ -14,6 +14,7 @@ use crate::fx_meta::TensorFacts;
 use crate::layout::ctx::LayoutCtx;
 use crate::layout::meta;
 use crate::layout::shape::mark_contiguous;
+use crate::permutation::{dims_to_i64, inverse_permutation, is_identity_permutation, permute_by};
 
 const PERMUTE_COPY: &str = "aten.permute_copy.default";
 
@@ -62,27 +63,28 @@ fn normalize_inputs(ctx: &mut LayoutCtx<'_>) -> bool {
         ) else {
             continue;
         };
-        if is_identity(&order) || order.len() != shape.len() {
+        if is_identity_permutation(&order) || order.len() != shape.len() {
             continue;
         }
 
         // `input_fake.reshape(boundary_shape)` is contiguous.
-        let boundary: Vec<i64> = order.iter().map(|&axis| shape[axis]).collect();
+        let boundary = permute_by(&shape, &order);
         let dtype = dtype_of(&node.meta);
         let meta = ctx.meta_mut(id);
         meta.set_tensor_facts(TensorFacts::new(boundary.clone(), dtype));
         meta.set_val_dim_order(identity(order.len()));
 
-        let transpose = inverse(&order);
+        // `_inverse_permutation` (`:31-36`).
+        let transpose = inverse_permutation(&order);
         let permute_meta =
-            boundary_permute_meta(&ctx.node(id).meta, permuted(&boundary, &transpose));
+            boundary_permute_meta(&ctx.node(id).meta, permute_by(&boundary, &transpose));
         let name = format!("{}_logical", ctx.node(id).name);
         let permute = ctx.inserting_after(id, |ctx| {
             ctx.create_node(
                 NodeOp::CallFunction,
                 name,
                 PERMUTE_COPY,
-                vec![IrArg::Node(id), i64_list_arg(&to_i64(&transpose))],
+                vec![IrArg::Node(id), i64_list_arg(&dims_to_i64(&transpose))],
                 HashMap::new(),
                 permute_meta,
             )
@@ -125,10 +127,10 @@ fn rewrite_output_arg(ctx: &mut LayoutCtx<'_>, arg: &IrArg) -> (IrArg, bool) {
             ) else {
                 return (arg.clone(), false);
             };
-            if is_identity(&order) || order.len() != shape.len() {
+            if is_identity_permutation(&order) || order.len() != shape.len() {
                 return (arg.clone(), false);
             }
-            let meta = boundary_permute_meta(&node.meta, permuted(&shape, &order));
+            let meta = boundary_permute_meta(&node.meta, permute_by(&shape, &order));
             let name = format!("{}_dim_order", node.name);
             // Each output permute goes directly after its producer, so a
             // producer returned twice gets the second permute first.
@@ -137,7 +139,7 @@ fn rewrite_output_arg(ctx: &mut LayoutCtx<'_>, arg: &IrArg) -> (IrArg, bool) {
                     NodeOp::CallFunction,
                     name,
                     PERMUTE_COPY,
-                    vec![IrArg::Node(id), i64_list_arg(&to_i64(&order))],
+                    vec![IrArg::Node(id), i64_list_arg(&dims_to_i64(&order))],
                     HashMap::new(),
                     meta,
                 )
@@ -171,29 +173,8 @@ fn dtype_of(meta: &NodeMeta) -> String {
     meta.val_dtype().unwrap_or("torch.float32").to_owned()
 }
 
-fn is_identity(order: &[usize]) -> bool {
-    order.iter().enumerate().all(|(index, &axis)| index == axis)
-}
-
 fn identity(rank: usize) -> Vec<usize> {
     (0..rank).collect()
-}
-
-/// `_inverse_permutation` (`:31-36`).
-fn inverse(permutation: &[usize]) -> Vec<usize> {
-    let mut inverse = vec![0; permutation.len()];
-    for (index, &axis) in permutation.iter().enumerate() {
-        inverse[axis] = index;
-    }
-    inverse
-}
-
-fn permuted(shape: &[i64], permutation: &[usize]) -> Vec<i64> {
-    permutation.iter().map(|&axis| shape[axis]).collect()
-}
-
-fn to_i64(dims: &[usize]) -> Vec<i64> {
-    dims.iter().map(|&dim| dim as i64).collect()
 }
 
 #[cfg(test)]
@@ -322,11 +303,5 @@ mod tests {
 
         assert!(!run(&mut g));
         g.assert_targets(&["aten.relu.default"]);
-    }
-
-    #[test]
-    fn inverse_undoes_the_permutation() {
-        assert_eq!(inverse(&NHWC), vec![0, 3, 1, 2]);
-        assert_eq!(inverse(&inverse(&NHWC)), NHWC.to_vec());
     }
 }

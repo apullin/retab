@@ -152,7 +152,7 @@ use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, IrNode, NodeId, NodeMeta, NodeO
 use crate::fx_meta::TensorFacts;
 use crate::fx_target::{classify_ir_target, IrTargetKind};
 #[cfg(test)]
-use crate::layout::ctx::is_impure_call;
+use crate::layout::ctx::{has_target_op, is_impure_call};
 use crate::layout::ctx::LayoutCtx;
 use crate::layout::fx_node::{all_input_nodes, rc4_target};
 use crate::layout::pending::{is_pending_table, TABLE_OPS};
@@ -161,6 +161,7 @@ use crate::layout::shape::{
     has_local_rule, infer_facts, int_list, mark_contiguous, reduce_shape, refreshed_meta,
     ShapeError,
 };
+use crate::permutation::inverse_permutation;
 
 /// `PERMUTE_COPY_TARGETS` (`backends/transforms/channels_last_layout.py:14-18`).
 const PERMUTE_COPY_TARGETS: &[&str] = &[
@@ -331,11 +332,7 @@ impl IrPass for IrRemovePermutesAroundElementwiseOpsPass {
 
 #[cfg(test)]
 fn run_standalone(graph: &mut IrGraph, config: &RemovePermutesConfig) -> bool {
-    if !graph
-        .live_call_function_ids()
-        .into_iter()
-        .any(|id| is_permute_copy(graph.node(id)))
-    {
+    if !has_target_op(graph, is_permute_copy) {
         return false;
     }
     let mut ctx = LayoutCtx::new(graph);
@@ -571,7 +568,7 @@ fn find_subgraphs(
             continue;
         };
         let start: Perm = start.into();
-        let end: Perm = inverse(&start).into();
+        let end: Perm = inverse_permutation(&start).into();
         for user in users(ctx, permute) {
             if !detector.is_node_permutable(ctx, user)
                 && detector.interleave_triple(ctx, user).is_none()
@@ -902,7 +899,7 @@ impl<'c> Detector<'c> {
                 return false;
             };
             let adapted: Perm = adapted.into();
-            (Perm::from(inverse(&adapted)), adapted)
+            (Perm::from(inverse_permutation(&adapted)), adapted)
         } else {
             (current_end.clone(), current_start.clone())
         };
@@ -1099,7 +1096,7 @@ impl<'c> Detector<'c> {
         if !restored.iter().copied().eq(0..in_shape.len()) {
             return None;
         }
-        let inverse = inverse(start_permute);
+        let inverse = inverse_permutation(start_permute);
         let unpermuted_input: Vec<i64> = inverse.iter().map(|&index| in_shape[index]).collect();
         find_extra_ones(&end_shape, &unpermuted_input)?;
         Some(end_shape)
@@ -1513,7 +1510,7 @@ fn remapped_sink_shape(ctx: &LayoutCtx<'_>, sink: NodeId, start_permute: &[usize
         return None;
     }
     Some(
-        inverse(start_permute)
+        inverse_permutation(start_permute)
             .iter()
             .map(|&index| out_shape[index])
             .collect(),
@@ -1603,14 +1600,6 @@ fn is_permute_copy(node: &IrNode) -> bool {
 /// `node.target in PERMUTE_COPY_TARGETS`.
 fn is_permute_target(target: &str) -> bool {
     PERMUTE_COPY_TARGETS.contains(&target)
-}
-
-fn inverse(perm: &[usize]) -> Vec<usize> {
-    let mut inverse = vec![0; perm.len()];
-    for (index, &dim) in perm.iter().enumerate() {
-        inverse[dim] = index;
-    }
-    inverse
 }
 
 fn first_arg_node(node: &IrNode) -> Option<NodeId> {
@@ -2015,7 +2004,7 @@ fn update_pad(ctx: &mut LayoutCtx<'_>, id: NodeId, perm: &[usize]) {
         }
         pad_pairs[slot as usize] = [pad[pair_start], pad[pair_start + 1]];
     }
-    let inverse = inverse(perm);
+    let inverse = inverse_permutation(perm);
     let mut remapped: Vec<i64> = Vec::with_capacity(2 * rank);
     for dim in (0..rank).rev() {
         remapped.extend_from_slice(&pad_pairs[inverse[dim]]);
@@ -2032,7 +2021,7 @@ fn update_view_copy(ctx: &mut LayoutCtx<'_>, id: NodeId, perm: &[usize]) {
     let Some((in_shape, out_shape)) = view_shapes(ctx, id) else {
         return;
     };
-    let inverse = inverse(perm);
+    let inverse = inverse_permutation(perm);
     let unpermuted: Vec<i64> = inverse.iter().map(|&index| in_shape[index]).collect();
     if out_shape.len() > in_shape.len() {
         let Some(positions) = find_extra_ones(&out_shape, &in_shape) else {
@@ -2065,7 +2054,7 @@ fn update_view_copy(ctx: &mut LayoutCtx<'_>, id: NodeId, perm: &[usize]) {
 fn update_interleave(ctx: &mut LayoutCtx<'_>, head: NodeId, triple: Triple, perm: &[usize]) {
     let input = first_arg_node(ctx.node(head)).expect("an interleave head reads a node");
     let in_shape = concrete_shape(ctx, input).expect("validated before the rewrite");
-    let inverse = inverse(perm);
+    let inverse = inverse_permutation(perm);
     let unpermuted: Vec<i64> = inverse.iter().map(|&index| in_shape[index]).collect();
     let target_dim = perm[triple.dim];
 

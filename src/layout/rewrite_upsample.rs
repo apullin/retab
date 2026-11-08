@@ -50,7 +50,7 @@ use std::collections::HashMap;
 
 use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, IrNode, IrPass, NodeId, NodeOp};
 use crate::fx_meta::TensorFacts;
-use crate::layout::ctx::LayoutCtx;
+use crate::layout::ctx::{run_planned_rewrites, LayoutCtx};
 use crate::layout::dtype::{
     operand_dtype, resize_output_dtype, set_special_dtype, value_dtype, SpecialDtype,
 };
@@ -264,38 +264,7 @@ impl IrPass for IrRewriteUpsamplePass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        if !graph
-            .live_call_function_ids()
-            .into_iter()
-            .any(|id| is_target(&graph.node(id).target))
-        {
-            return false;
-        }
-        let mut ctx = LayoutCtx::new(graph);
-        let mut modified = false;
-        for id in ctx.order().to_vec() {
-            let node = ctx.node(id);
-            if node.op != NodeOp::CallFunction || !is_target(&node.target) {
-                continue;
-            }
-            match plan(ctx.graph(), id) {
-                Ok(plan) => {
-                    rewrite(&mut ctx, id, &plan);
-                    modified = true;
-                }
-                Err(reason) => {
-                    crate::stock_fallback::request(format!(
-                        "IrRewriteUpsample: {}: {reason}",
-                        ctx.node(id).name
-                    ));
-                    break;
-                }
-            }
-        }
-        if modified {
-            ctx.finish();
-        }
-        modified
+        run_planned_rewrites(graph, self.name(), is_target, plan, rewrite)
     }
 }
 

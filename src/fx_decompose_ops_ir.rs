@@ -57,35 +57,6 @@ struct DecomposeRule {
 const MAX_DIM_MATCHER: TargetMatcher = TargetMatcher::any(&["aten.max.dim"]);
 const MIN_DIM_MATCHER: TargetMatcher = TargetMatcher::any(&["aten.min.dim"]);
 
-fn has_direct_non_getitem_user(graph: &IrGraph, id: NodeId) -> bool {
-    graph
-        .live_user_ids(id)
-        .into_iter()
-        .any(|user_id| user_id != id && !graph.nodes[user_id].is_getitem())
-}
-
-fn replace_primary_result_users(graph: &mut IrGraph, id: NodeId, result: NodeId) -> bool {
-    let getitem_users = graph.live_getitem_users(id);
-
-    if getitem_users.is_empty() {
-        graph.replace_and_erase(id, result);
-        return true;
-    }
-
-    if has_direct_non_getitem_user(graph, id) {
-        return false;
-    }
-
-    for (getitem_id, idx) in getitem_users {
-        if idx != 0 {
-            return false;
-        }
-        graph.replace_and_erase(getitem_id, result);
-    }
-    graph.erase(id);
-    true
-}
-
 fn pow_scalar_numeric_arg(node: &crate::fx_ir::IrNode) -> Option<f64> {
     node.arg_numeric_f64(1)
 }
@@ -370,7 +341,7 @@ fn decompose_dim_extrema(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     }
 
-    if has_direct_non_getitem_user(graph, id) {
+    if graph.has_direct_non_getitem_user(id) {
         return false;
     }
 
@@ -1020,7 +991,7 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
 
         ctx.add(&mut cursor, "result", weighted, bias_view)
     };
-    replace_primary_result_users(graph, id, result)
+    graph.replace_primary_result_users(id, result)
 }
 
 fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
@@ -1174,7 +1145,7 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
 
         ctx.reshape_shape(&mut cursor, "result", args.reshape_target, biased, &shape)
     };
-    replace_primary_result_users(graph, id, result)
+    graph.replace_primary_result_users(id, result)
 }
 
 /// stack(tensors, dim) → unsqueeze each + cat

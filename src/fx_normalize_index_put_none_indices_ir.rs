@@ -10,15 +10,8 @@
 
 use crate::fx_ir::{IrArg, IrGraph, IrPass, IrRewriteCursor, NodeId, NodeMeta};
 use crate::fx_target::is_index_put_default_target;
+use crate::permutation::{dims_to_i64, inverse_permutation, is_identity_permutation, permute_by};
 use crate::runner_logging::log_line;
-
-fn permute_shape(shape: &[i64], order: &[usize]) -> Vec<i64> {
-    order.iter().map(|&d| shape[d]).collect()
-}
-
-fn is_identity(order: &[usize]) -> bool {
-    order.iter().enumerate().all(|(i, &d)| i == d)
-}
 
 /// Create a permute_copy node; returns (id, permuted shape).
 #[allow(clippy::too_many_arguments)]
@@ -30,9 +23,9 @@ fn add_permute(
     order: &[usize],
     name: String,
 ) -> (NodeId, Vec<i64>) {
-    let out_shape = permute_shape(input_shape, order);
+    let out_shape = permute_by(input_shape, order);
     let meta = input_meta.cloned_with_same_dtype_or_float32(out_shape.clone());
-    let perm: Vec<i64> = order.iter().map(|&d| d as i64).collect();
+    let perm = dims_to_i64(order);
     let n = cursor.permute_copy(name, input_id, &perm, meta);
     (n, out_shape)
 }
@@ -114,7 +107,7 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     if destination_dim_order.len() != dest_rank {
         return false;
     }
-    let needs_dest_permute = !is_identity(&destination_dim_order);
+    let needs_dest_permute = !is_identity_permutation(&destination_dim_order);
 
     let mut cursor = graph.rewrite_cursor(id);
 
@@ -134,7 +127,7 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
 
     // permute (and maybe reshape) data
     let ddo = data_dim_order(&explicit_dims, &destination_dim_order);
-    let needs_data_permute = !is_identity(&ddo);
+    let needs_data_permute = !is_identity_permutation(&ddo);
     let data_use = if needs_data_permute {
         let aligned_rank = ddo.len();
         let (reshaped_id, reshaped_shape) = if data_shape.len() < aligned_rank {
@@ -173,7 +166,7 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     ];
     new_args.extend(rest_args);
     // result meta = permuted dest meta if permuted, else original
-    let put_shape = permute_shape(&dest_shape, &destination_dim_order);
+    let put_shape = permute_by(&dest_shape, &destination_dim_order);
     let put_meta = if needs_dest_permute {
         orig_meta.cloned_with_same_dtype_or_float32(put_shape.clone())
     } else {
@@ -188,10 +181,7 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
 
     // permute back
     let final_id = if needs_dest_permute {
-        let mut inv = vec![0usize; destination_dim_order.len()];
-        for (new_dim, &orig_dim) in destination_dim_order.iter().enumerate() {
-            inv[orig_dim] = new_dim;
-        }
+        let inv = inverse_permutation(&destination_dim_order);
         let (p, _) = add_permute(
             &mut cursor,
             new_put,

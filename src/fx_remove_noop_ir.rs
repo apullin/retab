@@ -9,7 +9,9 @@
 //! value.
 
 use crate::fx_fuse_consecutive_slices_ir::static_slice;
-use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{
+    i64_list_arg, resolve_inferred_reshape_shape, IrArg, IrGraph, IrPass, NodeId, NodeOp,
+};
 use crate::fx_target::{noop_target, NoopTarget};
 use crate::runner_logging::log_line;
 
@@ -113,31 +115,14 @@ fn is_identity_view(graph: &IrGraph, id: NodeId, input: NodeId) -> bool {
     if graph.node_shape(id) != Some(input_shape) {
         return false;
     }
-    let Some(mut shape) = node.arg(1).and_then(|arg| graph.constant_shape(arg)) else {
+    let Some(shape) = node.arg(1).and_then(|arg| graph.constant_shape(arg)) else {
         return false;
     };
-    if let Some(inferred) = shape.iter().position(|&dim| dim == -1) {
-        let Some(known) = shape
-            .iter()
-            .filter(|&&dim| dim != -1)
-            .try_fold(1i64, |product, &dim| {
-                (dim >= 0).then(|| product.checked_mul(dim)).flatten()
-            })
-        else {
-            return false;
-        };
-        let Some(numel) = input_shape
-            .iter()
-            .try_fold(1i64, |product, &dim| product.checked_mul(dim))
-        else {
-            return false;
-        };
-        if shape.iter().filter(|&&dim| dim == -1).count() != 1 || known == 0 || numel % known != 0 {
-            return false;
-        }
-        shape[inferred] = numel / known;
+    // Only a -1 is inferred; a shape without one is compared as written.
+    if !shape.contains(&-1) {
+        return shape == input_shape;
     }
-    shape == input_shape
+    resolve_inferred_reshape_shape(&shape, input_shape).is_some_and(|shape| shape == input_shape)
 }
 
 /// A `_to_copy`/`_to_dim_order_copy` whose val dtypes disagree only because

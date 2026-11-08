@@ -1,4 +1,5 @@
 use super::*;
+use crate::fx_ir::resolve_inferred_reshape_shape;
 use crate::serialize::op_semantics;
 use std::cell::RefCell;
 use std::collections::HashMap as StdHashMap;
@@ -33,33 +34,11 @@ pub(super) fn val_rank(node: &Node) -> usize {
     node.meta.val.shape_len as usize
 }
 
+/// [`resolve_inferred_reshape_shape`] on the serializer's i32 shapes.
 fn resolve_inferred_shape(shape: &[i32], input_shape: &[i32]) -> Option<Vec<i32>> {
-    let negative_positions: Vec<usize> = shape
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, &dim)| (dim < 0).then_some(idx))
-        .collect();
-    if negative_positions.is_empty() {
-        return Some(shape.to_vec());
-    }
-    if negative_positions.len() > 1 {
-        return None;
-    }
-
-    let input_numel = input_shape
-        .iter()
-        .try_fold(1i64, |acc, &dim| acc.checked_mul(dim as i64))?;
-    let known_product = shape
-        .iter()
-        .filter(|&&dim| dim >= 0)
-        .try_fold(1i64, |acc, &dim| acc.checked_mul(dim as i64))?;
-    if known_product == 0 || input_numel % known_product != 0 {
-        return None;
-    }
-
-    let mut resolved = shape.to_vec();
-    resolved[negative_positions[0]] = (input_numel / known_product) as i32;
-    Some(resolved)
+    let widen = |dims: &[i32]| dims.iter().map(|&dim| i64::from(dim)).collect::<Vec<_>>();
+    let resolved = resolve_inferred_reshape_shape(&widen(shape), &widen(input_shape))?;
+    Some(resolved.into_iter().map(|dim| dim as i32).collect())
 }
 
 /// `axis` counted from the front of `node`'s val; an axis outside it comes back as is.
@@ -241,11 +220,23 @@ fn table_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option
     first_input_shape(graph, store, node)
 }
 
-fn strided_slice_shape(node: &Node, input_shape: &[i32]) -> Option<Vec<i32>> {
-    if node.args.len() < 4 {
-        return None;
-    }
+/// The window `slice(input, dim, start, end, step)` takes along its dim, as the
+/// serializer reads the arguments.
+pub(super) struct SliceWindow {
+    /// The dim, counted from the front and clamped into the input's rank.
+    pub(super) dim: usize,
+    /// The arguments as given; `end` defaults to the dim's size.
+    pub(super) start: i64,
+    pub(super) end: i64,
+    pub(super) step: i64,
+    /// The first index, clamped into the dim.
+    pub(super) start_index: i64,
+    /// How many elements the slice keeps.
+    pub(super) len: i64,
+}
 
+/// `node`'s [`SliceWindow`] over `input_shape`.
+pub(super) fn slice_window(node: &Node, input_shape: &[i32]) -> Option<SliceWindow> {
     let rank = input_shape.len() as i64;
     let raw_dim = arg_i64(node, 1, 0);
     let normalized_dim = if raw_dim < 0 { raw_dim + rank } else { raw_dim };
@@ -254,22 +245,35 @@ fn strided_slice_shape(node: &Node, input_shape: &[i32]) -> Option<Vec<i32>> {
     let start = arg_i64(node, 2, 0);
     let end = arg_i64(node, 3, input_dim);
     let step = arg_i64(node, 4, 1);
-    let start_idx = if start < 0 {
+    let start_index = if start < 0 {
         (input_dim + start).max(0)
     } else {
         start.min(input_dim)
     };
-    let mut end_idx = if end < 0 { input_dim + end } else { end };
-    end_idx = end_idx.clamp(start_idx, input_dim);
-
-    let slice_len = if step == 1 {
-        (end_idx - start_idx).max(0)
+    let end_index = if end < 0 { input_dim + end } else { end };
+    let end_index = end_index.clamp(start_index, input_dim);
+    let len = if step == 1 {
+        (end_index - start_index).max(0)
     } else {
-        ((end_idx - start_idx).max(0) + step - 1) / step
+        ((end_index - start_index).max(0) + step - 1) / step
     };
+    Some(SliceWindow {
+        dim,
+        start,
+        end,
+        step,
+        start_index,
+        len,
+    })
+}
 
+fn strided_slice_shape(node: &Node, input_shape: &[i32]) -> Option<Vec<i32>> {
+    if node.args.len() < 4 {
+        return None;
+    }
+    let window = slice_window(node, input_shape)?;
     let mut output_shape = input_shape.to_vec();
-    *output_shape.get_mut(dim)? = slice_len as i32;
+    *output_shape.get_mut(window.dim)? = window.len as i32;
     Some(output_shape)
 }
 
@@ -426,6 +430,34 @@ mod tests {
 
     fn meta(shape: &[i64], dtype: DType) -> NodeMeta {
         NodeMeta::new(TensorInfo::new(shape, dtype))
+    }
+
+    #[test]
+    fn a_slice_window_clamps_its_dim_and_bounds() {
+        // `(dim, start index, length)` of a slice of a [2, 10, 4] input whose
+        // args after the input are `args` (dim, start, end, step).
+        fn window(args: &[i64]) -> (usize, i64, i64) {
+            let mut graph = Graph::new();
+            let id = graph.create_node(
+                OpType::CallFunction,
+                OpTarget::Slice,
+                std::iter::once(Arg::None)
+                    .chain(args.iter().map(|&value| Arg::Int(value)))
+                    .collect(),
+                Vec::new(),
+                meta(&[], DType::Float32),
+                "slice".into(),
+            );
+            let window = slice_window(graph.node(id).unwrap(), &[2, 10, 4]).unwrap();
+            (window.dim, window.start_index, window.len)
+        }
+        assert_eq!(window(&[1, 2, 7, 1]), (1, 2, 5));
+        assert_eq!(window(&[-2, -3, i64::MAX, 1]), (1, 7, 3));
+        assert_eq!(window(&[1, -11, 10, 1]), (1, 0, 10));
+        assert_eq!(window(&[1, 1, 10, 3]), (1, 1, 3));
+        assert_eq!(window(&[1, 8, 3, 1]), (1, 8, 0));
+        assert_eq!(window(&[5, 0, 1, 1]), (2, 0, 1));
+        assert_eq!(window(&[1]), (1, 0, 10));
     }
 
     #[test]

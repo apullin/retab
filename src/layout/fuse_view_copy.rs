@@ -15,7 +15,7 @@
 
 use crate::fx_ir::{IrGraph, IrPass, NodeId, NodeOp};
 use crate::fx_meta::TensorFacts;
-use crate::layout::ctx::LayoutCtx;
+use crate::layout::ctx::{has_target_op, LayoutCtx};
 use crate::layout::shape::{mark_contiguous, refreshed_meta};
 use crate::layout::pending::is_pending_table;
 
@@ -68,11 +68,7 @@ impl IrPass for IrFuseViewCopyTransformPass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        if !graph
-            .live_call_function_ids()
-            .into_iter()
-            .any(|id| graph.node(id).target == VIEW_COPY)
-        {
+        if !has_target_op(graph, |node| node.target == VIEW_COPY) {
             return false;
         }
         let mut ctx = LayoutCtx::new(graph);

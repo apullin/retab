@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
 use crate::fx_meta::TensorFacts;
-use crate::layout::ctx::LayoutCtx;
+use crate::layout::ctx::{has_target_op, LayoutCtx};
 use crate::layout::shape::mark_contiguous;
 
 const VIEW_COPY: &str = "aten.view_copy.default";
@@ -77,12 +77,7 @@ impl IrPass for IrMatchArgRanksPass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        // `ArmOpTargetedPass` skips graphs without a target op.
-        if !graph
-            .live_call_function_ids()
-            .into_iter()
-            .any(|id| is_target(&graph.node(id).target))
-        {
+        if !has_target_op(graph, |node| is_target(&node.target)) {
             return false;
         }
         let mut ctx = LayoutCtx::new(graph);

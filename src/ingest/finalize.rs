@@ -1,41 +1,13 @@
 //! Post-conversion graph finalization for serialize graphs produced from Rust IR.
 
+use crate::fx_ir::resolve_inferred_reshape_shape;
 use crate::graph::ir::*;
 use crate::graph::Graph;
+use crate::serialize::op_semantics::is_accumulator_output;
 
 // ---------------------------------------------------------------------------
 // Post-ingestion shape fixup
 // ---------------------------------------------------------------------------
-
-/// `shape` with its one -1 (if any) resolved against `input_shape`'s element count.
-fn resolve_inferred_reshape_shape(shape: &[i64], input_shape: &[i64]) -> Option<Vec<i64>> {
-    let negative_positions: Vec<usize> = shape
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, &dim)| (dim < 0).then_some(idx))
-        .collect();
-    if negative_positions.is_empty() {
-        return Some(shape.to_vec());
-    }
-    if negative_positions.len() > 1 {
-        return None;
-    }
-
-    let input_numel = input_shape
-        .iter()
-        .try_fold(1i64, |acc, &dim| acc.checked_mul(dim))?;
-    let known_product = shape
-        .iter()
-        .filter(|&&dim| dim >= 0)
-        .try_fold(1i64, |acc, &dim| acc.checked_mul(dim))?;
-    if known_product == 0 || input_numel % known_product != 0 {
-        return None;
-    }
-
-    let mut resolved = shape.to_vec();
-    resolved[negative_positions[0]] = input_numel / known_product;
-    Some(resolved)
-}
 
 /// Give each Reshape/View/Flatten node its target shape (`args[1]`) as its val.
 fn fixup_reshape_shapes(graph: &mut Graph) {
@@ -86,23 +58,6 @@ fn fixup_reshape_shapes(graph: &mut Graph) {
 // ---------------------------------------------------------------------------
 // Post-ingestion dtype fixup
 // ---------------------------------------------------------------------------
-
-/// Returns true for ops that produce int32 accumulator outputs, IrRewriteConv's TOSA
-/// CONV3D included (P2 design X1).
-fn is_accumulator_op(target: &OpTarget) -> bool {
-    matches!(
-        target,
-        OpTarget::TosaConv2d
-            | OpTarget::TosaDepthwiseConv2d
-            | OpTarget::TosaConv3d
-            | OpTarget::TosaTransposeConv2d
-            | OpTarget::Linear
-            | OpTarget::Addmm
-            | OpTarget::Matmul
-            | OpTarget::Bmm
-            | OpTarget::TosaMatmul
-    )
-}
 
 /// Fix up `meta.val.dtype` on all nodes based on quantization parameters.
 fn fixup_quantized_dtypes(graph: &mut Graph) {
@@ -168,7 +123,7 @@ fn fixup_quantized_dtypes_once(graph: &mut Graph) {
                 }
                 continue;
             }
-            if is_accumulator_op(&target) && (has_input_qp || has_output_qp) {
+            if is_accumulator_output(&target) && (has_input_qp || has_output_qp) {
                 if let Some(node) = graph.node_mut(node_id) {
                     node.meta.val.dtype = DType::Int32;
                 }

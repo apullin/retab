@@ -11,6 +11,7 @@ use crate::fx_ir::{
 };
 use crate::fx_target::is_index_tensor_target;
 use crate::graph::ir::DType;
+use crate::permutation::is_identity_permutation;
 use crate::runner_logging::log_line;
 
 const MAX_U55_INDEX_TENSOR_ELEMENTS: usize = 64;
@@ -24,10 +25,6 @@ fn compute_index_output_shape(
     out.extend_from_slice(broadcast);
     out.extend_from_slice(kept_shape);
     out
-}
-
-fn is_identity_perm(perm: &[i64]) -> bool {
-    perm.iter().enumerate().all(|(i, &value)| value == i as i64)
 }
 
 pub struct IrDecomposeIndexTensorPass {
@@ -176,7 +173,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
             let result = {
                 let mut cursor = graph.rewrite_cursor(id);
                 let mut values_in = x_id;
-                if !is_identity_perm(&perm) {
+                if !is_identity_permutation(&perm) {
                     let permuted_shape: Vec<i64> =
                         perm.iter().map(|&pos| x_shape[pos as usize]).collect();
                     values_in = cursor.permute_copy(

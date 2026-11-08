@@ -169,32 +169,6 @@ fn add_tensor_placeholder(
     id
 }
 
-fn has_direct_non_getitem_user(graph: &IrGraph, id: NodeId) -> bool {
-    graph
-        .live_user_ids(id)
-        .into_iter()
-        .any(|user_id| user_id != id && !graph.node(user_id).is_getitem())
-}
-
-fn replace_primary_result_users(graph: &mut IrGraph, id: NodeId, result: NodeId) -> bool {
-    let getitem_users = graph.live_getitem_users(id);
-    if getitem_users.is_empty() {
-        graph.replace_and_erase(id, result);
-        return true;
-    }
-    if has_direct_non_getitem_user(graph, id) {
-        return false;
-    }
-    for (getitem_id, idx) in getitem_users {
-        if idx != 0 {
-            return false;
-        }
-        graph.replace_and_erase(getitem_id, result);
-    }
-    graph.erase(id);
-    true
-}
-
 fn fuse_batch_norm_node(graph: &mut IrGraph, bn_id: NodeId) -> bool {
     if !graph.node(bn_id).alive {
         return false;
@@ -285,7 +259,7 @@ fn fuse_batch_norm_node(graph: &mut IrGraph, bn_id: NodeId) -> bool {
         IrArg::Node(fused_weight_id),
     );
     graph.set_arg(conv_id, ConvArgs::BIAS_INDEX, IrArg::Node(fused_bias_id));
-    replace_primary_result_users(graph, bn_id, conv_id)
+    graph.replace_primary_result_users(bn_id, conv_id)
 }
 
 #[cfg(test)]
