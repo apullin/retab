@@ -616,6 +616,35 @@ mod tests {
         assert_eq!(index_of(&graph, "gather"), "indices");
     }
 
+    /// rc4's other boundary checks, each on a graph that passes all the rest: the
+    /// cast must widen an int32 tensor (`is_safe_int32_to_int64_gather_boundary`),
+    /// and the gather must index axis 1, Python's `dim % rank`, of rank-2 or rank-3
+    /// operands (`_is_compatible_gather_user`). Each keeps its cast, which goes to
+    /// stock.
+    #[test]
+    fn other_sources_axes_and_ranks_keep_the_boundary() {
+        for (case, source_dtype, dim, shape) in [
+            ("an int16 source", "torch.int16", 1, &[2, 3, 2][..]),
+            ("a float source", F32, 1, &[2, 3, 2][..]),
+            ("axis 0", INT32, 0, &[2, 3, 2][..]),
+            ("axis -1", INT32, -1, &[2, 3, 2][..]),
+            ("rank 4", INT32, 1, &[2, 3, 2, 1][..]),
+        ] {
+            let mut values_shape = shape.to_vec();
+            values_shape[1] = 8;
+            let mut graph = IrGraph::empty();
+            let values = input(&mut graph, "values", &values_shape, F32);
+            let indices = input(&mut graph, "indices", shape, source_dtype);
+            let cast = int64_cast(&mut graph, "cast", indices, value(shape, INT64));
+            let out = gather(&mut graph, "gather", values, dim, cast, value(shape, F32));
+            output(&mut graph, &[out]);
+            let (modified, fallback) = run(&pass("TOSA-1.0+INT"), &mut graph);
+            assert!(!modified, "{case}");
+            assert!(fallback.is_some(), "{case}");
+            assert_eq!(index_of(&graph, "gather"), "cast", "{case}");
+        }
+    }
+
     /// Two gathers on one boundary, as in rc4's shared-boundary partitioner
     /// test: each moves off in graph order, the boundary staying safe for the
     /// one left, and the boundary goes with the last.
