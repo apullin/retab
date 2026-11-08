@@ -174,8 +174,8 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         Ir(Box::new(fx_convert_full_like_ir::IrConvertFullLikePass)),
         // APM:664, right after ConvertFullLikeToFull (APM:661); design C3. SELECT gets a
         // `where` mask rank-matched here, which it broadcasts (APU-161). RETAB runs its
-        // avg-pool, var and mean decompositions after this slot, where rc4 runs them
-        // before (critique B9); phase-6 slot 7 rank-matches what they create.
+        // avg-pool and mean decompositions after this slot, where rc4 runs them before
+        // (critique B9); phase-6 slot 7 rank-matches what they create.
         Ir(Box::new(
             crate::layout::match_arg_ranks::IrMatchArgRanksPass,
         )),
@@ -216,7 +216,6 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         )));
     }
     steps.extend(vec![
-        Ir(Box::new(crate::fx_decompose_var_ir::IrDecomposeVarPass)),
         Ir(Box::new(crate::fx_decompose_mean_ir::IrDecomposeMeanPass)),
         Ir(Box::new(fx_convert_sum_ir::IrConvertBoolSumPass)),
         Ir(Box::new(
@@ -557,6 +556,13 @@ mod tests {
                 );
                 assert_eq!(count("IrFuseIdenticalInputTransforms"), 1, "{spec}");
                 assert!(position("IrFuseConsecutiveClamps") < position("IrQuantizeClampArgs"));
+
+                // APM:553-554: DecomposeLayerNorm, then DecomposeVar, once. The var
+                // nodes the layer norm decomposition creates are the only ones a step
+                // creates.
+                let layer_norm = position("IrDecomposeLayerNorm");
+                assert_eq!(names[layer_norm + 1], "IrDecomposeVar", "{spec}");
+                assert_eq!(count("IrDecomposeVar"), 1, "{spec}");
 
                 // The control-flow RESCALE targets, recorded right before the fold
                 // (rc4 reads them at APM:595, from FoldAndAnnotate's annotation).
