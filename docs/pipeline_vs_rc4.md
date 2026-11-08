@@ -87,7 +87,7 @@ away from their rc4 slot ([Order differences](#order-differences-before-phase-6)
 | 35 | IrDecomposeTril | (DecomposeTrilPass, quantizer side, :817) | RETAB-only. |
 | 36 | IrDecomposeLogit | DecomposeLogitPass, :609 | |
 | 37 | IrDecomposeNotEqual | DecomposeNotEqualPass, :671 | Moved. |
-| 38 | IrReplaceScalarWithTensor | ReplaceScalarWithTensorByProfilePass, :656 | Scalar shifts only; the serializer takes the other scalar operands. |
+| 38 | IrReplaceScalarWithTensor | ReplaceScalarWithTensorByProfilePass, :656 | Scalar shifts, and eq.Scalar and ne.Scalar on a bool tensor (APU-123); the serializer takes the other scalar operands. |
 | 39 | IrDecomposeDivTensorMode | DecomposeDivTensorModePass, :678 | Moved. |
 | 40 | IrDecomposeAddmm | DecomposeAddmmPass, :621 | Moved. |
 | 41 | IrDecomposeCumsum | DecomposeCumsumPass, :689 | Moved. |
@@ -227,7 +227,7 @@ is recorded: RETAB's order predates the rc4 port, and the gate passes with it
 | IrDecomposeFlip, IrDecomposeRoll (14-15) | :630-631, phase 3 | Before IrDecomposeLinear (:592) | Historical. Both are data movement that keeps its input's qparams, so the rescale steps around them are unaffected. | 0 |
 | IrInsertQdqRescale (17) | InsertRescalePass, :766, phase 7 | Right after the fold | Historical. | 10 |
 | IrCanonicalizeGather (28) | :549, phase 1 | After the fold | Historical. | 0 |
-| IrDecomposeNotEqual (37) | :671, phase 5 | Before IrReplaceScalarWithTensor (:656) | RETAB kept v1.3.1's slot when upstream moved the pass. Either order ends in EQUAL and LOGICAL_NOT: rc4 makes ne.Scalar a tensor op first, and RETAB's serializer gives eq.Scalar its constant. | 0 |
+| IrDecomposeNotEqual (37) | :671, phase 5 | Before IrReplaceScalarWithTensor (:656) | RETAB kept v1.3.1's slot when upstream moved the pass. Either order ends in EQUAL and LOGICAL_NOT: rc4 makes ne.Scalar a tensor op first, and RETAB's serializer gives eq.Scalar its constant. On a bool tensor both end in LOGICAL_XOR and two LOGICAL_NOTs, since step 38 makes RETAB's eq.Scalar a tensor op too. | 0 |
 | IrDecomposeDivTensorMode, IrDecomposeCumsum, IrDecomposeAsStridedCopy (39, 41, 44) | :678, :689, :690, phase 5 | Before IrConvertFullLike and IrMatchArgRanks (:661, :664) | Historical. The binary ops they create are rank-matched at step 47 rather than in phase 6 (:732). | 0 |
 | IrDecomposeAddmm (40) | :621, phase 3 | After IrReplaceScalarWithTensor (:656) | Historical. It creates no `.Scalar` op, so the scalar rewrite's position doesn't matter. | 0 |
 | IrQuantizeClampArgs (45) | :604, phase 3 | After the phase-4 and phase-5 decompositions | Historical. It keeps rc4's one constraint (:581-586): FuseConsecutiveClamps runs first, while clamp bounds are still float. | 15 |

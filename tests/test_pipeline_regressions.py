@@ -265,6 +265,49 @@ def test_constant_index_select_tosa_INT(indices, dtype):
     assert (Op.Op.CONCAT in ops) == (indices == [3, 1, 3])
 
 
+class BoolScalarComparison(torch.nn.Module):
+    """`value == scalar`, or `value != scalar`, on a bool tensor."""
+
+    def __init__(self, scalar, negate=False):
+        super().__init__()
+        self.scalar = scalar
+        self.negate = negate
+
+    def forward(self, value):
+        if self.negate:
+            return value != self.scalar
+        return value == self.scalar
+
+
+def _bool_input(shape):
+    return torch.arange(int(np.prod(shape))).reshape(shape) % 3 == 0
+
+
+def _main_ops(graph):
+    """The main block's ops without its CONSTs."""
+    block = graph.Regions(0).Blocks(0)
+    ops = [block.Operators(i).Op() for i in range(block.OperatorsLength())]
+    return [op for op in ops if op != Op.Op.CONST]
+
+
+@pytest.mark.parametrize(
+    "shape,scalar", [((6,), True), ((2, 3, 4), True), ((3, 4), False), ((2, 5), 1)]
+)
+def test_bool_eq_scalar_lowers_as_logical_xor_then_not_tosa_INT(shape, scalar):
+    """TOSA's EQUAL takes no bool inputs. As rc4's ReplaceScalarWithTensorByProfilePass
+    does (APM:656), IrReplaceScalarWithTensor makes a bool eq.Scalar an eq.Tensor with a
+    bool `full`, which IrDecomposeBoolEquality splits (APU-123)."""
+    graph = _lower_and_compare(BoolScalarComparison(scalar), (_bool_input(shape),))
+    assert _main_ops(graph) == [Op.Op.LOGICAL_XOR, Op.Op.LOGICAL_NOT]
+
+
+def test_bool_ne_scalar_lowers_as_logical_xor_then_two_nots_tosa_INT():
+    graph = _lower_and_compare(
+        BoolScalarComparison(True, negate=True), (_bool_input((3, 4)),)
+    )
+    assert _main_ops(graph) == [Op.Op.LOGICAL_XOR, Op.Op.LOGICAL_NOT, Op.Op.LOGICAL_NOT]
+
+
 class NegativePad(torch.nn.Module):
     def __init__(self, constant_pad_nd):
         super().__init__()

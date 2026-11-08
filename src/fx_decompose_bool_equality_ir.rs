@@ -41,13 +41,11 @@
 //! are not two nodes, or that has no value; rc4's fake kernels could not
 //! have produced either.
 //!
-//! An `eq.Scalar` is not a target either. rc4's
-//! ReplaceScalarWithTensorByProfilePass (`:656`) has made it an `eq.Tensor`
-//! by this slot, while RETAB's IrReplaceScalarWithTensor rewrites only shifts.
-//! On the quantized flow that makes no difference: rc4's quantizer runs the
-//! same pass in its transform-for-annotation pipeline, so a bool eq with a
-//! scalar arrives as an `eq.Tensor`. A graph lowered without the quantizer
-//! can still bring a bool `eq.Scalar`, which the serializer emits as EQUAL.
+//! An `eq.Scalar` is not a target either. By this slot rc4's
+//! ReplaceScalarWithTensorByProfilePass (`:656`) has made a bool one an
+//! `eq.Tensor` whose second operand is a bool `full`, and so has RETAB's
+//! IrReplaceScalarWithTensor. On the quantized flow the eq arrives that way,
+//! because rc4's quantizer runs the same rewrite while it annotates.
 //!
 //! The pass is not a TFA pass, so `allowed_to_transform` is always true for
 //! it. Like every `ArmOpTargetedPass`, it leaves a graph without a target
