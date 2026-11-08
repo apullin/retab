@@ -1,10 +1,11 @@
 
 use crate::fx_constant_tensor_eval::{
-    constant_input_seeds, ConstantTensors, first_constant_input_tensor, node_has_tensor_inputs,
+    constant_input_seeds, first_constant_input_tensor, logical_op, node_has_tensor_inputs,
     node_inputs_are_constant, plan_constant_cast_tensor, plan_constant_comparison_tensors,
-    plan_constant_conv_tensor, plan_constant_linear_tensor, plan_constant_matmul_tensor,
-    plan_constant_reciprocal_tensor, plan_constant_slice_tensor_from_constants,
-    plan_shape_only_tensor_from_constants,
+    plan_constant_conv_tensor, plan_constant_linear_tensor, plan_constant_logical_tensor,
+    plan_constant_matmul_tensor, plan_constant_reciprocal_tensor,
+    plan_constant_slice_tensor_from_constants, plan_shape_only_tensor_from_constants,
+    ConstantTensors,
 };
 use crate::fx_fuse_zero_input_constants_ir::{zero_input_tensor_with, FullQParams};
 use crate::fx_ir::{EffectfulIrPass, EffectfulIrPassResult, IrArg, IrGraph, IrNode, NodeOp};
@@ -56,6 +57,7 @@ fn is_safe_constant_input_target(node: &IrNode, include_data_slices: bool) -> bo
         || is_to_copy_target(&node.target)
         || is_comparison_target(&node.target)
         || is_reciprocal_target(&node.target)
+        || logical_op(node).is_some()
 }
 
 /// Stock's FuseConstantArgsPass skips fusing when the node carries the SHAPE
@@ -87,6 +89,20 @@ fn plan_elementwise_constant_tensor(
         let lhs = inputs.next()?;
         let rhs = inputs.next()?;
         return plan_constant_comparison_tensors(node, lhs, rhs);
+    }
+    if let Some(op) = logical_op(node) {
+        // The LOGICAL_XOR and LOGICAL_NOT a bool eq of two constants becomes
+        // (IrDecomposeBoolEquality), like any logical op of constants, fold
+        // as rc4's FuseConstantArgs folds them (APU-123).
+        let inputs = node
+            .args
+            .iter()
+            .map(|arg| match arg {
+                IrArg::Node(node_id) => constant_tensors.get(node_id),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        return plan_constant_logical_tensor(node, op, &inputs);
     }
     None
 }
@@ -288,6 +304,142 @@ mod tests {
         let gt_effect = seen.get("rhs_negative").expect("missing gt effect");
         assert_eq!(gt_effect.dtype, DType::Bool);
         assert_eq!(gt_effect.data, vec![0]);
+    }
+
+    /// A bool constant whose meta holds its value, as the importer gives one.
+    fn bool_constant(graph: &mut IrGraph, name: &str, shape: Vec<i64>, values: &[bool]) -> usize {
+        let id = constant_placeholder(
+            graph,
+            name,
+            TensorData {
+                data: values.iter().map(|&value| u8::from(value)).collect(),
+                shape: shape.clone(),
+                dtype: DType::Bool,
+            },
+        );
+        graph.node_mut(id).meta = NodeMeta::tensor(shape, "torch.bool");
+        id
+    }
+
+    fn planned(result: &EffectfulIrPassResult) -> HashMap<String, (Vec<i64>, DType, Vec<u8>)> {
+        result
+            .effects
+            .items
+            .iter()
+            .filter_map(|effect| match effect {
+                LoweringEffect::MaterializeTensorNode(effect) => Some((
+                    effect.node_name.clone(),
+                    (effect.shape.clone(), effect.dtype, effect.data.clone()),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// rc4's FuseConstantArgs folds the LOGICAL_XOR and LOGICAL_NOT that
+    /// DecomposeBoolEquality makes of a bool eq of two constants. The sweep
+    /// plans both, the LOGICAL_NOT from the LOGICAL_XOR's plan (APU-123).
+    #[test]
+    fn folds_the_logical_ops_of_a_bool_eq_of_constants() {
+        use crate::fx_decompose_bool_equality_ir::IrDecomposeBoolEqualityPass;
+        use crate::fx_ir::IrPass;
+
+        let mut graph = IrGraph::empty();
+        let a = bool_constant(&mut graph, "a", vec![3, 1], &[true, false, true]);
+        let b = bool_constant(&mut graph, "b", vec![1, 3], &[true, false, true]);
+        let eq = graph.add_node(
+            NodeOp::CallFunction,
+            "eq".to_string(),
+            "aten.eq.Tensor".to_string(),
+            vec![IrArg::Node(a), IrArg::Node(b)],
+            NodeMeta::tensor(vec![3, 3], "torch.bool"),
+        );
+        graph.add_node(
+            NodeOp::Output,
+            "output".to_string(),
+            "output".to_string(),
+            vec![IrArg::Node(eq)],
+            NodeMeta::default(),
+        );
+        assert!(IrDecomposeBoolEqualityPass.run(&mut graph));
+
+        let result = IrFuseConstantInputsEffectPass::matmul_only().run(&mut graph);
+        assert!(result.modified);
+        let planned = planned(&result);
+        assert_eq!(
+            planned.get("eq_logical_xor"),
+            Some(&(vec![3, 3], DType::Bool, vec![0, 1, 0, 1, 0, 1, 0, 1, 0]))
+        );
+        assert_eq!(
+            planned.get("eq_logical_not"),
+            Some(&(vec![3, 3], DType::Bool, vec![1, 0, 1, 0, 1, 0, 1, 0, 1]))
+        );
+    }
+
+    /// A bitwise op with a bool value folds as its logical op, since rc4
+    /// rewrites it to one (APM:676) before its folds; an int bitwise op, which
+    /// the planners do not evaluate, stays. So does a logical op with a
+    /// runtime input.
+    #[test]
+    fn folds_bool_bitwise_ops_of_constants_but_not_int_ones() {
+        let mut graph = IrGraph::empty();
+        let a = bool_constant(&mut graph, "a", vec![4], &[true, false, true, false]);
+        let b = bool_constant(&mut graph, "b", vec![4], &[true, true, false, false]);
+        let x = graph.add_node(
+            NodeOp::Placeholder,
+            "x".to_string(),
+            "x".to_string(),
+            Vec::new(),
+            NodeMeta::tensor(vec![4], "torch.bool"),
+        );
+        let ints = constant_placeholder(
+            &mut graph,
+            "ints",
+            TensorData {
+                data: [1i32, 2, 3, 4]
+                    .into_iter()
+                    .flat_map(i32::to_le_bytes)
+                    .collect(),
+                shape: vec![4],
+                dtype: DType::Int32,
+            },
+        );
+        for (name, target, args, dtype) in [
+            ("and", "aten.bitwise_and.Tensor", vec![a, b], "torch.bool"),
+            ("or", "aten.bitwise_or.Tensor", vec![a, b], "torch.bool"),
+            ("xor", "aten.bitwise_xor.Tensor", vec![a, b], "torch.bool"),
+            ("not", "aten.bitwise_not.default", vec![a], "torch.bool"),
+            (
+                "int_and",
+                "aten.bitwise_and.Tensor",
+                vec![ints, ints],
+                "torch.int32",
+            ),
+            (
+                "runtime",
+                "aten.logical_or.default",
+                vec![x, a],
+                "torch.bool",
+            ),
+        ] {
+            graph.add_node(
+                NodeOp::CallFunction,
+                name.to_string(),
+                target.to_string(),
+                args.into_iter().map(IrArg::Node).collect(),
+                NodeMeta::tensor(vec![4], dtype),
+            );
+        }
+
+        let planned = planned(&IrFuseConstantInputsEffectPass::matmul_only().run(&mut graph));
+        let values = |name: &str| planned.get(name).map(|(_, _, data)| data.clone());
+        assert_eq!(values("and"), Some(vec![1, 0, 0, 0]));
+        assert_eq!(values("or"), Some(vec![1, 1, 1, 0]));
+        assert_eq!(values("xor"), Some(vec![0, 1, 1, 0]));
+        assert_eq!(values("not"), Some(vec![0, 1, 0, 1]));
+        assert_eq!(values("int_and"), None);
+        assert_eq!(values("runtime"), None);
+        assert_eq!(planned.len(), 4, "{planned:?}");
     }
 
     #[test]

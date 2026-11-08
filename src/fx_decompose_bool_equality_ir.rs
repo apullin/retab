@@ -16,14 +16,12 @@
 //! still reaches this pass, and the ne becomes
 //! `logical_not(logical_not(logical_xor(a, b)))`, as in rc4.
 //!
-//! RETAB's folds differ from rc4's here. rc4's FuseConstantArgs (`:700`)
-//! folds the `logical_xor` and `logical_not` of an eq between two constants.
-//! RETAB's fold planner, IrFuseConstantInputsEffectPass (which runs just
-//! after this pass and inside IrMaterializeConstants), folds comparisons but
-//! not logical ops. So a bool eq of two constants, which RETAB folded before
-//! this port, now lowers as LOGICAL_XOR and LOGICAL_NOT on two CONSTs: valid,
-//! but not folded. Only a graph lowered without the quantizer can show this;
-//! the quantized flow folds such an eq before RETAB sees it.
+//! rc4's FuseConstantArgs (`:700`) folds the `logical_xor` and `logical_not`
+//! of an eq between two constants into one constant. So does RETAB's fold
+//! planner, IrFuseConstantInputsEffectPass, which runs just after this pass
+//! and inside IrMaterializeConstants: it folds logical ops as well as
+//! comparisons. Only a graph lowered without the quantizer can bring such an
+//! eq; the quantized flow folds it before RETAB sees it.
 //!
 //! The port builds its nodes as rc4's `call_operator(op, args, {}, meta,
 //! updated=True)` does ([`meta::call_operator`]):
@@ -41,13 +39,11 @@
 //! are not two nodes, or that has no value; rc4's fake kernels could not
 //! have produced either.
 //!
-//! An `eq.Scalar` is not a target either. rc4's
-//! ReplaceScalarWithTensorByProfilePass (`:656`) has made it an `eq.Tensor`
-//! by this slot, while RETAB's IrReplaceScalarWithTensor rewrites only shifts.
-//! On the quantized flow that makes no difference: rc4's quantizer runs the
-//! same pass in its transform-for-annotation pipeline, so a bool eq with a
-//! scalar arrives as an `eq.Tensor`. A graph lowered without the quantizer
-//! can still bring a bool `eq.Scalar`, which the serializer emits as EQUAL.
+//! An `eq.Scalar` is not a target either. By this slot rc4's
+//! ReplaceScalarWithTensorByProfilePass (`:656`) has made a bool one an
+//! `eq.Tensor` whose second operand is a bool `full`, and so has RETAB's
+//! IrReplaceScalarWithTensor. On the quantized flow the eq arrives that way,
+//! because rc4's quantizer runs the same rewrite while it annotates.
 //!
 //! The pass is not a TFA pass, so `allowed_to_transform` is always true for
 //! it. Like every `ArmOpTargetedPass`, it leaves a graph without a target

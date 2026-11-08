@@ -669,6 +669,71 @@ mod tests {
         }
     }
 
+    /// rc4 on a bool eq of two constants: DecomposeBoolEquality's LOGICAL_XOR
+    /// and LOGICAL_NOT both fold, the second over the first's constant, so one
+    /// constant with the eq's values takes the first input's place, and the
+    /// inputs and the intermediate constant go (APU-123). The operands are
+    /// rc4's test_eq.py `eq_bool` ones.
+    #[test]
+    fn a_bool_eq_of_constants_folds_to_one_constant() {
+        let bools = |shape: &[i64], values: &[bool]| TensorData {
+            data: values.iter().map(|&value| u8::from(value)).collect(),
+            shape: shape.to_vec(),
+            dtype: DType::Bool,
+        };
+        let mut graph = IrGraph::empty();
+        let a = weight(&mut graph, "a", bools(&[3, 1], &[true, false, true]));
+        let b = weight(&mut graph, "b", bools(&[1, 3], &[true, false, true]));
+        let x = placeholder(&mut graph, "x", [3, 3], "torch.bool");
+        let eq = call(
+            &mut graph,
+            "aten_eq_tensor",
+            "aten.eq.Tensor",
+            vec![node(a), node(b)],
+            [3, 3],
+            "torch.bool",
+        );
+        let and = call(
+            &mut graph,
+            "aten_logical_and_default",
+            "aten.logical_and.default",
+            vec![node(x), node(eq)],
+            [3, 3],
+            "torch.bool",
+        );
+        output(&mut graph, &[and]);
+
+        assert!(crate::fx_decompose_bool_equality_ir::IrDecomposeBoolEqualityPass.run(&mut graph));
+        assert!(run(&mut graph));
+        assert_eq!(
+            names(&graph),
+            [
+                "aten_eq_tensor_logical_not_fused_const",
+                "x",
+                "aten_logical_and_default",
+                "output"
+            ]
+        );
+        assert_eq!(
+            kind(&graph, "aten_eq_tensor_logical_not_fused_const"),
+            "Buffer"
+        );
+        assert_tensor_eq(
+            tensor(&graph, "aten_eq_tensor_logical_not_fused_const"),
+            &bools(
+                &[3, 3],
+                &[true, false, true, false, true, false, true, false, true],
+            ),
+            "a == b",
+        );
+        let constant = live(&graph, "aten_eq_tensor_logical_not_fused_const");
+        assert_eq!(graph.node(constant).meta.val_dtype(), Some("torch.bool"));
+        assert_eq!(
+            graph.node(live(&graph, "aten_logical_and_default")).args[1].as_node(),
+            Some(constant)
+        );
+    }
+
     /// A fold whose input another node still reads leaves that input alone,
     /// and an intermediate constant with another user survives too.
     #[test]
