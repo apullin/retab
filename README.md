@@ -220,7 +220,7 @@ unavailable. Counters remain process-local.
 ## Validation
 
 Benchmarks, the stock-versus-RETAB differential harness, and the model corpus
-are kept separately in a private repository. Results for v0.4.1:
+are kept separately in a private repository. Results for v0.4.2:
 
 - **Op suite.** ExecuTorch v1.6.0-rc4's `backends/arm/test/ops -k tosa_INT`,
   with RETAB swapped in for `TOSABackend._preprocess`: 2,374 passed and none
