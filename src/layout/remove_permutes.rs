@@ -19,18 +19,34 @@
 //!
 //! Dim arguments in the region are remapped (cat, keepdim reductions, slice,
 //! constant pads, squeeze/unsqueeze views and the repeat_interleave triple),
-//! constants get a compensating permute (or a view when their rank is lower),
-//! numel-1 inputs stay as they are, other incoming permutes with the same
-//! permutation are bypassed too, and an outgoing permute that is not the
-//! inverse absorbs the removed one instead.
+//! constants get a compensating permute (or a view when their rank is lower,
+//! followed by a permute when the view alone would move data), numel-1 inputs
+//! stay as they are, other incoming permutes with the same permutation are
+//! bypassed too, and an outgoing permute that is not the inverse absorbs the
+//! removed one instead.
 //!
 //! # Faithfulness
 //!
 //! The detection sweep, the region search and every rewrite follow rc4 line by
-//! line; each function names the rc4 lines it mirrors. rc4's region search
-//! defers nested visits onto a stack (`visit`, `:457-485`), which is not a
-//! recursive DFS, and that order decides which permutation a node reached on
-//! two paths gets; [`Detector::visit`] keeps the same stack discipline.
+//! line; each function names the rc4 lines it mirrors. Two upstream fixes are
+//! followed instead, as their release/1.6 backports have them. A lower-rank
+//! constant is compensated as the backport of #24315 does it (fork branch
+//! `retab/pick-1.6/transpose-lower-rank-constants`, 52ecaaf136), since rc4's
+//! view reshapes it where a transpose is needed, giving wrong output, or
+//! raises. And a region in which a node broadcasts operands of different rank
+//! keeps its permutes, as #24469's guard in the backport stacked on it decides
+//! (`retab/pick-1.6/mixed-rank-broadcast-guard`, 8c5df6f460), since rc4
+//! rewrites it into a differently shaped result. The guard skips TABLE, which
+//! looks each element up in its table and never broadcasts it, as the fix
+//! stacked on that backport has it (`retab/pick-1.6/guard-table-exemption`,
+//! c3172c0028); that fix also keeps only a TABLE's table out of the constant
+//! edges, where rc4 drops every constant input of a TABLE, so a constant data
+//! input is moved into the region's layout like any other constant. The
+//! replay fixtures that reach these changes are generated from that fix.
+//! rc4's region search defers nested visits onto a stack (`visit`,
+//! `:457-485`), which is not a recursive DFS, and that order decides which
+//! permutation a node reached on two paths gets; [`Detector::visit`] keeps
+//! the same stack discipline.
 //!
 //! Users are visited in torch.fx's order, as rc4 iterates `node.users`
 //! (`:433`, `:566`), which the ctx tracks (`LayoutCtx::users_in_fx_order`).
@@ -51,9 +67,17 @@
 //!
 //! - **TABLE.** rc4 has already replaced quantized table ops with
 //!   `TABLE(x, table)` (`layout::pending`). The TOSA subclass drops the table's
-//!   constant edge (`:45-54`), so a pending table differs from its TABLE only in
-//!   the visit's constant-rank check on that rank-1 table input, which fails a
-//!   rank-0 region (`:631-637`); [`Detector::visit_one`] applies that check.
+//!   constant edge (`:53-65` of c3172c0028), so that the table, which TABLE
+//!   indexes by value, is not reshaped or permuted into the region's layout,
+//!   and the mixed-rank guard skips TABLE, which never broadcasts its table
+//!   (`_NON_BROADCASTING_OPS`; [`RemovePermutesConfig::is_non_broadcasting_op`]);
+//!   a pending table reads a single tensor, which the guard passes anyway. A
+//!   pending table therefore differs from its TABLE only in the visit's
+//!   constant-rank check on that rank-1 table input, which fails a rank-0
+//!   region (`:631-637`); [`Detector::visit_one`] applies that check. The
+//!   replay fixtures whose generator hands rc4 the op itself, before any TABLE
+//!   is inserted, replay the port with a test hook under which a pending table
+//!   is that plain op (`RemovePermutesConfig::before_table_insertion`).
 //! - **Constants.** rc4's subclass reads parameters, buffers and lifted
 //!   constants from the graph signature (`:30-43`); in RETAB those
 //!   placeholders carry tensor data, which the port reads instead. The base
@@ -152,7 +176,7 @@ use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, IrNode, NodeId, NodeMeta, NodeO
 use crate::fx_meta::TensorFacts;
 use crate::fx_target::{classify_ir_target, IrTargetKind};
 #[cfg(test)]
-use crate::layout::ctx::is_impure_call;
+use crate::layout::ctx::{has_target_op, is_impure_call};
 use crate::layout::ctx::LayoutCtx;
 use crate::layout::fx_node::{all_input_nodes, rc4_target};
 use crate::layout::pending::{is_pending_table, TABLE_OPS};
@@ -161,6 +185,7 @@ use crate::layout::shape::{
     has_local_rule, infer_facts, int_list, mark_contiguous, reduce_shape, refreshed_meta,
     ShapeError,
 };
+use crate::permutation::inverse_permutation;
 
 /// `PERMUTE_COPY_TARGETS` (`backends/transforms/channels_last_layout.py:14-18`).
 const PERMUTE_COPY_TARGETS: &[&str] = &[
@@ -220,7 +245,9 @@ pub(crate) type TargetFilter = fn(&IrGraph, NodeId) -> bool;
 pub(crate) struct RemovePermutesConfig {
     /// `RemovePermutesAroundElementwiseTosaOps`: TABLE ops, RESCALE and TABLE
     /// are permutable (`:19-26`), graph-signature constants count as constants
-    /// (`:40-43`) and TABLE's constant edges are dropped (`:45-54`).
+    /// (`:40-43`), and, as in c3172c0028, TABLE does not broadcast (`:18-24`
+    /// there) and a TABLE's table is dropped from the constant edges
+    /// (`:53-65` there; rc4's `:45-54` drop every constant input of a TABLE).
     pub(crate) tosa: bool,
     pub(crate) extra_permutable_ops: Vec<&'static str>,
     pub(crate) target_filters: Vec<(&'static str, TargetFilter)>,
@@ -228,6 +255,12 @@ pub(crate) struct RemovePermutesConfig {
     /// `get_permutation` for one node (named here).
     #[cfg(test)]
     pub(crate) permutation_override: Option<(String, Vec<usize>)>,
+    /// Test hook for graphs at a stage where rc4 has inserted no TABLE yet,
+    /// such as the replay fixtures that hand rc4's pass a quantized table op
+    /// as the op itself: a pending table is then that plain op, with no table
+    /// input (see the TABLE bullet in the module docs).
+    #[cfg(test)]
+    pub(crate) before_table_insertion: bool,
 }
 
 impl RemovePermutesConfig {
@@ -265,6 +298,26 @@ impl RemovePermutesConfig {
             .iter()
             .find(|(filtered, _)| same_target(filtered, target))
             .map(|&(_, filter)| filter)
+    }
+
+    /// `node.target in self._NON_BROADCASTING_OPS`, the ops the mixed-rank
+    /// guard skips because they never broadcast their operands against each
+    /// other: cat in the base pass (`:754-758` of c3172c0028), and TABLE too
+    /// in the subclass (`:18-24` there), which looks each element up in its
+    /// rank-1 table.
+    fn is_non_broadcasting_op(&self, target: &str) -> bool {
+        target == CAT || (self.tosa && is_tosa_table_target(target))
+    }
+
+    /// Whether `node` stands for a `TABLE(x, table)` that rc4 has inserted
+    /// with its rank-1 table input by the time the subclass runs
+    /// (`layout::pending`).
+    fn is_inserted_table(&self, node: &IrNode) -> bool {
+        #[cfg(test)]
+        let before_table_insertion = self.before_table_insertion;
+        #[cfg(not(test))]
+        let before_table_insertion = false;
+        self.tosa && !before_table_insertion && is_pending_table(node)
     }
 }
 
@@ -331,11 +384,7 @@ impl IrPass for IrRemovePermutesAroundElementwiseOpsPass {
 
 #[cfg(test)]
 fn run_standalone(graph: &mut IrGraph, config: &RemovePermutesConfig) -> bool {
-    if !graph
-        .live_call_function_ids()
-        .into_iter()
-        .any(|id| is_permute_copy(graph.node(id)))
-    {
+    if !has_target_op(graph, is_permute_copy) {
         return false;
     }
     let mut ctx = LayoutCtx::new(graph);
@@ -571,7 +620,7 @@ fn find_subgraphs(
             continue;
         };
         let start: Perm = start.into();
-        let end: Perm = inverse(&start).into();
+        let end: Perm = inverse_permutation(&start).into();
         for user in users(ctx, permute) {
             if !detector.is_node_permutable(ctx, user)
                 && detector.interleave_triple(ctx, user).is_none()
@@ -902,7 +951,7 @@ impl<'c> Detector<'c> {
                 return false;
             };
             let adapted: Perm = adapted.into();
-            (Perm::from(inverse(&adapted)), adapted)
+            (Perm::from(inverse_permutation(&adapted)), adapted)
         } else {
             (current_end.clone(), current_start.clone())
         };
@@ -994,7 +1043,7 @@ impl<'c> Detector<'c> {
         // rc4's TABLE reads a rank-1 table constant after its input
         // (`insert_table_ops.py:392-401`), and the constant check above rejects
         // it in a rank-0 region; the subclass drops the edge otherwise.
-        if self.config.tosa && is_pending_table(ctx.node(node)) && current_end.is_empty() {
+        if self.config.is_inserted_table(ctx.node(node)) && current_end.is_empty() {
             return false;
         }
         true
@@ -1099,7 +1148,7 @@ impl<'c> Detector<'c> {
         if !restored.iter().copied().eq(0..in_shape.len()) {
             return None;
         }
-        let inverse = inverse(start_permute);
+        let inverse = inverse_permutation(start_permute);
         let unpermuted_input: Vec<i64> = inverse.iter().map(|&index| in_shape[index]).collect();
         find_extra_ones(&end_shape, &unpermuted_input)?;
         Some(end_shape)
@@ -1513,7 +1562,7 @@ fn remapped_sink_shape(ctx: &LayoutCtx<'_>, sink: NodeId, start_permute: &[usize
         return None;
     }
     Some(
-        inverse(start_permute)
+        inverse_permutation(start_permute)
             .iter()
             .map(|&index| out_shape[index])
             .collect(),
@@ -1603,14 +1652,6 @@ fn is_permute_copy(node: &IrNode) -> bool {
 /// `node.target in PERMUTE_COPY_TARGETS`.
 fn is_permute_target(target: &str) -> bool {
     PERMUTE_COPY_TARGETS.contains(&target)
-}
-
-fn inverse(perm: &[usize]) -> Vec<usize> {
-    let mut inverse = vec![0; perm.len()];
-    for (index, &dim) in perm.iter().enumerate() {
-        inverse[dim] = index;
-    }
-    inverse
 }
 
 fn first_arg_node(node: &IrNode) -> Option<NodeId> {
@@ -1730,8 +1771,10 @@ struct Rewrite {
     unused: Vec<NodeId>,
 }
 
-/// `permute_subgraph` (`:753-885`), after the subclass drops TABLE's constant
-/// edges (`remove_permutes_around_elementwise_tosa_ops.py:45-54`).
+/// `permute_subgraph` (`:753-885`), after the subclass drops each TABLE's
+/// table from the constant edges
+/// (`remove_permutes_around_elementwise_tosa_ops.py:53-65` of c3172c0028;
+/// rc4's `:45-54` drop every constant input of a TABLE).
 fn permute_subgraph(
     ctx: &mut LayoutCtx<'_>,
     config: &RemovePermutesConfig,
@@ -1739,9 +1782,11 @@ fn permute_subgraph(
     rewrite: &mut Rewrite,
 ) -> bool {
     if config.tosa {
-        subgraph
-            .constant_edges_in
-            .retain(|&(_, user)| !is_tosa_table_target(&ctx.node(user).target));
+        subgraph.constant_edges_in.retain(|&(constant, user)| {
+            let user = ctx.node(user);
+            !(is_tosa_table_target(&user.target)
+                && user.args.get(1).and_then(IrArg::as_node) == Some(constant))
+        });
     }
     if !subgraph_edges_are_current(ctx, config, subgraph, &rewrite.bypassed) {
         return false;
@@ -1778,6 +1823,34 @@ fn permute_subgraph(
             if perm.len() != rank {
                 return false;
             }
+        }
+    }
+    // #24469: no node may broadcast operands of different rank (`:801-832` of
+    // the release/1.6 backports, at c3172c0028). Broadcasting right-aligns
+    // shapes, so once the permutes are gone a lower-rank operand lines up
+    // against other dims and the region computes a differently shaped result.
+    // Numel-1 operands broadcast the same under any permutation, the
+    // non-broadcasting ops never broadcast, and constant edges are moved into
+    // the region's layout below (#24315). TABLE's table edge, which the
+    // subclass has dropped, is not counted, since TABLE is skipped; a pending
+    // table reads only its input.
+    for &node in subgraph.nodes.iter() {
+        let target = ctx.node(node).target.as_str();
+        if interleave_nodes.contains(&node)
+            || VIEW_OPS.contains(&target)
+            || config.is_non_broadcasting_op(target)
+        {
+            continue;
+        }
+        let ranks: HashSet<usize> = all_input_nodes(ctx.node(node))
+            .into_iter()
+            .filter(|&input| !subgraph.constant_edges_in.contains(&(input, node)))
+            .filter_map(|input| ctx.graph().node_shape(input))
+            .filter(|shape| shape.iter().product::<i64>() > 1)
+            .map(<[i64]>::len)
+            .collect();
+        if ranks.len() > 1 {
+            return false;
         }
     }
 
@@ -1830,8 +1903,8 @@ fn permute_subgraph(
         rewrite.unused.push(input);
     }
 
-    // Compensate the constant inputs (`:840-873`), in graph order of
-    // (constant, user).
+    // Compensate the constant inputs (`:840-873`; `:840-881` with the
+    // release/1.6 backport of #24315), in graph order of (constant, user).
     let constant_edges = in_graph_order(ctx, subgraph.constant_edges_in.iter().copied());
     for (constant, user) in constant_edges {
         let const_shape = ctx.graph().node_shape_vec(constant);
@@ -1849,20 +1922,55 @@ fn permute_subgraph(
                     )
                 })
             }
+            // #24315: a view moves a lower-rank constant into the region's
+            // layout only when its non-unit dims keep their order, dropping
+            // just leading 1s. Otherwise the constant is viewed to the
+            // region's rank and permuted; rc4 viewed it either way, which
+            // reshapes where a transpose is needed, or raises.
             Some(shape) if shape.len() < permute_rank => {
                 let mut padded = vec![1; permute_rank - shape.len()];
                 padded.extend_from_slice(&shape);
-                let target_shape: Vec<i64> = node_end_perm.iter().map(|&d| padded[d]).collect();
-                let target_shape = target_shape[permute_rank - shape.len()..].to_vec();
-                let name = format!("{}_viewed", ctx.node(constant).name);
-                ctx.inserting_after(constant, |ctx| {
-                    ctx.call_function(
-                        name,
-                        VIEW_COPY,
-                        vec![IrArg::Node(constant), i64_list_arg(&target_shape)],
-                        NodeMeta::default(),
-                    )
-                })
+                let moved: Vec<usize> = node_end_perm
+                    .iter()
+                    .copied()
+                    .filter(|&d| padded[d] != 1)
+                    .collect();
+                let viewed = format!("{}_viewed", ctx.node(constant).name);
+                if moved.is_sorted() {
+                    let mut permuted: Vec<i64> = node_end_perm.iter().map(|&d| padded[d]).collect();
+                    let leading_ones = permuted[..permute_rank - shape.len()]
+                        .iter()
+                        .take_while(|&&d| d == 1)
+                        .count();
+                    permuted.drain(..leading_ones);
+                    ctx.inserting_after(constant, |ctx| {
+                        ctx.call_function(
+                            viewed,
+                            VIEW_COPY,
+                            vec![IrArg::Node(constant), i64_list_arg(&permuted)],
+                            NodeMeta::default(),
+                        )
+                    })
+                } else {
+                    let name = format!("{}_permuted", ctx.node(constant).name);
+                    let view = ctx.inserting_after(constant, |ctx| {
+                        ctx.call_function(
+                            viewed,
+                            VIEW_COPY,
+                            vec![IrArg::Node(constant), i64_list_arg(&padded)],
+                            NodeMeta::default(),
+                        )
+                    });
+                    rewrite.seeds.push(view);
+                    ctx.inserting_after(view, |ctx| {
+                        ctx.call_function(
+                            name,
+                            PERMUTE_COPY,
+                            vec![IrArg::Node(view), usize_list_arg(&node_end_perm)],
+                            NodeMeta::default(),
+                        )
+                    })
+                }
             }
             _ => continue,
         };
@@ -2015,7 +2123,7 @@ fn update_pad(ctx: &mut LayoutCtx<'_>, id: NodeId, perm: &[usize]) {
         }
         pad_pairs[slot as usize] = [pad[pair_start], pad[pair_start + 1]];
     }
-    let inverse = inverse(perm);
+    let inverse = inverse_permutation(perm);
     let mut remapped: Vec<i64> = Vec::with_capacity(2 * rank);
     for dim in (0..rank).rev() {
         remapped.extend_from_slice(&pad_pairs[inverse[dim]]);
@@ -2032,7 +2140,7 @@ fn update_view_copy(ctx: &mut LayoutCtx<'_>, id: NodeId, perm: &[usize]) {
     let Some((in_shape, out_shape)) = view_shapes(ctx, id) else {
         return;
     };
-    let inverse = inverse(perm);
+    let inverse = inverse_permutation(perm);
     let unpermuted: Vec<i64> = inverse.iter().map(|&index| in_shape[index]).collect();
     if out_shape.len() > in_shape.len() {
         let Some(positions) = find_extra_ones(&out_shape, &in_shape) else {
@@ -2065,7 +2173,7 @@ fn update_view_copy(ctx: &mut LayoutCtx<'_>, id: NodeId, perm: &[usize]) {
 fn update_interleave(ctx: &mut LayoutCtx<'_>, head: NodeId, triple: Triple, perm: &[usize]) {
     let input = first_arg_node(ctx.node(head)).expect("an interleave head reads a node");
     let in_shape = concrete_shape(ctx, input).expect("validated before the rewrite");
-    let inverse = inverse(perm);
+    let inverse = inverse_permutation(perm);
     let unpermuted: Vec<i64> = inverse.iter().map(|&index| in_shape[index]).collect();
     let target_dim = perm[triple.dim];
 
@@ -2113,7 +2221,21 @@ fn eliminate_dead_from(ctx: &mut LayoutCtx<'_>, candidates: impl IntoIterator<It
 /// graph order: the seeds always, and any other node once the value of one of
 /// its inputs, as that node sees it, has changed. A user rewired off a
 /// bypassed permute saw the permute's value before. In a correct rewrite only
-/// the seeds and the sink views below the region are recomputed.
+/// the seeds and the sink views below the region are recomputed, and the
+/// nodes a dtype change reaches.
+///
+/// RETAB's IR can record a view or permute copy with the float dtype of the
+/// op it came from, such as the views DecomposeLinear makes from a linear's
+/// meta, below a producer that records an integer dtype. Re-derived, such a
+/// copy takes its producer's dtype (see `layout::shape`), so its users see a
+/// value whose dtype alone changed, and through more copies so do theirs. Any
+/// other node keeps the dtype it records, and fake execution derives its
+/// shape from its operands' shapes, so a node outside the seeds that records
+/// a dtype, and whose operands all keep the shapes it saw, keeps its value.
+/// It needs no local rule: the `aten.mm` that RETAB keeps where rc4 has a
+/// MATMUL (ConvertMmToBmmPass, APM:679) reads such views in a matmul's
+/// decomposition. A seed, whose arguments the rewrite may have changed, and
+/// a node one of whose operands changed shape still fail without a rule.
 fn refresh(ctx: &mut LayoutCtx<'_>, rewrite: &Rewrite) {
     let mut queue: BinaryHeap<Reverse<(u64, NodeId)>> = BinaryHeap::new();
     let mut queued: HashSet<NodeId> = HashSet::new();
@@ -2147,18 +2269,32 @@ fn refresh(ctx: &mut LayoutCtx<'_>, rewrite: &Rewrite) {
             }
         }
     }
+    let seeds: HashSet<NodeId> = rewrite.seeds.iter().copied().collect();
+    // The value each refreshed node had before, which its users saw.
+    let mut previous: HashMap<NodeId, Option<TensorFacts>> = HashMap::new();
     while let Some(Reverse((_, id))) = queue.pop() {
         if ctx.is_erased(id) {
             continue;
         }
         let before = ctx.node(id).meta.tensor_facts().cloned();
-        let meta = retraced_meta(ctx.graph(), id).unwrap_or_else(|error| {
-            let node = ctx.node(id);
-            panic!(
-                "RemovePermutesAroundElementwiseOps: rc4's retrace fails at {} ({}): {error}",
-                node.name, node.target
-            )
-        });
+        let meta = match retraced_meta(ctx.graph(), id) {
+            Ok(meta) => meta,
+            Err(ShapeError::Unsupported(_))
+                if !seeds.contains(&id)
+                    && operands_keep_their_shapes(ctx.graph(), rewrite, &previous, id) =>
+            {
+                let mut meta = ctx.node(id).meta.clone();
+                mark_contiguous(&mut meta);
+                meta
+            }
+            Err(error) => {
+                let node = ctx.node(id);
+                panic!(
+                    "RemovePermutesAroundElementwiseOps: rc4's retrace fails at {} ({}): {error}",
+                    node.name, node.target
+                )
+            }
+        };
         let after = meta.tensor_facts().cloned();
         *ctx.meta_mut(id) = meta;
         for user in ctx.graph().live_user_ids(id) {
@@ -2170,7 +2306,30 @@ fn refresh(ctx: &mut LayoutCtx<'_>, rewrite: &Rewrite) {
                 push(ctx, &mut queue, &mut queued, user);
             }
         }
+        previous.insert(id, before);
     }
+}
+
+/// Whether `id` records a dtype and each of its operands has the shape `id`
+/// saw: for a rewired operand the value `seen_values` records, for a
+/// refreshed one its value before the refresh, and for any other its value
+/// now. Such a node keeps its value in the retrace (see [`refresh`]).
+fn operands_keep_their_shapes(
+    graph: &IrGraph,
+    rewrite: &Rewrite,
+    previous: &HashMap<NodeId, Option<TensorFacts>>,
+    id: NodeId,
+) -> bool {
+    let node = graph.node(id);
+    node.meta.val_dtype().is_some()
+        && all_input_nodes(node).into_iter().all(|input| {
+            let now = graph.node(input).meta.tensor_facts();
+            let seen = match rewrite.seen_values.get(&(id, input)) {
+                Some(seen) => seen.as_ref(),
+                None => previous.get(&input).map_or(now, Option::as_ref),
+            };
+            seen.map(|facts| &facts.shape) == now.map(|facts| &facts.shape)
+        })
 }
 
 /// `id`'s meta with its value re-derived from its operands, as rc4's retrace
@@ -2640,6 +2799,84 @@ mod tests {
         assert_eq!(expand_shape(&[2, 1, 3], &[-1, 4, 3]), Ok(vec![2, 4, 3]));
         assert_eq!(expand_shape(&[3], &[2, 3]), Ok(vec![2, 3]));
         assert!(expand_shape(&[2, 3], &[4, 3]).is_err());
+    }
+
+    /// The linformer gauntlet models' attention, reduced: a region whose exit
+    /// permute records float32 under an int8 producer, as DecomposeLinear's
+    /// views do, read by the view a matmul's decomposition puts before
+    /// `aten.mm`, which has no local rule. The view takes int8 from its new
+    /// producer; mm, whose operands keep their shapes, keeps its value
+    /// instead of failing the retrace.
+    #[test]
+    fn a_dtype_change_reaching_an_op_without_a_rule_keeps_its_value() {
+        let mut g = LayoutGraph::new();
+        let x = g.typed_input("x", &[3, 2], "torch.int8");
+        let p = g.permute(x, &[1, 0]);
+        let r = g.call(RELU, vec![node(p)]);
+        let q = g.permute(r, &[1, 0]);
+        g.graph_mut().node_mut(q).meta = NodeMeta::tensor(vec![3, 2], "torch.float32");
+        let v = g.view(q, &[3, 2]);
+        let w = g.typed_input("w", &[2, 4], "torch.int8");
+        let mm = g.add_unrefreshed("aten.mm.default", vec![node(v), node(w)]);
+        g.graph_mut().node_mut(mm).meta = NodeMeta::tensor(vec![3, 4], "torch.int32");
+        g.output(&[mm]);
+        assert_eq!(g.dtype(v), "torch.float32");
+        let names = [x, r, v, mm].map(|id| g.name(id));
+
+        assert!(run_with(RemovePermutesConfig::tosa(), &mut g));
+
+        let [x, r, v, mm] = names.map(|name| g.id(&name));
+        assert_eq!(g.count(PERMUTE), 0);
+        assert_eq!(g.graph().node(r).args[0].as_node(), Some(x));
+        assert_eq!(g.graph().node(v).args[0].as_node(), Some(r));
+        assert_eq!((g.shape(v), g.dtype(v)), (&[3, 2][..], "torch.int8"));
+        assert_eq!((g.shape(mm), g.dtype(mm)), (&[3, 4][..], "torch.int32"));
+        assert_eq!(g.graph().node(mm).meta.val_dim_order(), Some(&[0, 1][..]));
+    }
+
+    /// A node without a rule keeps its value only when it records a dtype and
+    /// every operand has the shape it saw: a rewired operand's recorded value,
+    /// a refreshed operand's value before the refresh, or the value now.
+    #[test]
+    fn a_node_without_a_rule_keeps_its_value_only_if_no_operand_shape_changed() {
+        let mut g = LayoutGraph::new();
+        let a = g.typed_input("a", &[3, 2], "torch.int8");
+        let b = g.typed_input("b", &[2, 4], "torch.int8");
+        let mm = g.add_unrefreshed("aten.mm.default", vec![node(a), node(b)]);
+        g.graph_mut().node_mut(mm).meta = NodeMeta::tensor(vec![3, 4], "torch.int32");
+        let graph = g.graph();
+        let facts = |shape: &[i64], dtype: &str| Some(TensorFacts::new(shape.to_vec(), dtype));
+        let mut rewrite = Rewrite::default();
+        let mut previous = HashMap::new();
+        assert!(operands_keep_their_shapes(graph, &rewrite, &previous, mm));
+
+        // A dtype change alone, rewired or refreshed, keeps the value.
+        rewrite
+            .seen_values
+            .insert((mm, a), facts(&[3, 2], "torch.float32"));
+        previous.insert(b, facts(&[2, 4], "torch.float32"));
+        assert!(operands_keep_their_shapes(graph, &rewrite, &previous, mm));
+
+        // A shape change does not, through either route.
+        previous.insert(b, facts(&[4, 2], "torch.int8"));
+        assert!(!operands_keep_their_shapes(graph, &rewrite, &previous, mm));
+        previous.insert(b, facts(&[2, 4], "torch.int8"));
+        rewrite
+            .seen_values
+            .insert((mm, a), facts(&[2, 3], "torch.int8"));
+        assert!(!operands_keep_their_shapes(graph, &rewrite, &previous, mm));
+
+        // Without a recorded dtype, the value would follow the operands'.
+        let mut untyped = LayoutGraph::new();
+        let a = untyped.typed_input("a", &[3, 2], "torch.int8");
+        let b = untyped.typed_input("b", &[2, 4], "torch.int8");
+        let mm = untyped.add_unrefreshed("aten.mm.default", vec![node(a), node(b)]);
+        assert!(!operands_keep_their_shapes(
+            untyped.graph(),
+            &Rewrite::default(),
+            &HashMap::new(),
+            mm
+        ));
     }
 }
 

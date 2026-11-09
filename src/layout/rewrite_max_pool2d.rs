@@ -53,9 +53,9 @@
 //! [`adjust_pooling_pad_if_needed`]: crate::layout::pool::adjust_pooling_pad_if_needed
 //! [`meta::call_operator`]: crate::layout::meta::call_operator
 
-use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, IrPass, NodeId};
 use crate::fx_meta::TensorFacts;
-use crate::layout::ctx::LayoutCtx;
+use crate::layout::ctx::{run_planned_rewrites, LayoutCtx};
 use crate::layout::dtype::operand_dtype;
 use crate::layout::meta;
 use crate::layout::pool::{
@@ -83,38 +83,7 @@ impl IrPass for IrRewriteMaxPool2dPass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        if !graph
-            .live_call_function_ids()
-            .into_iter()
-            .any(|id| is_target(&graph.node(id).target))
-        {
-            return false;
-        }
-        let mut ctx = LayoutCtx::new(graph);
-        let mut modified = false;
-        for id in ctx.order().to_vec() {
-            let node = ctx.node(id);
-            if node.op != NodeOp::CallFunction || !is_target(&node.target) {
-                continue;
-            }
-            match plan(ctx.graph(), id) {
-                Ok(plan) => {
-                    rewrite(&mut ctx, id, &plan);
-                    modified = true;
-                }
-                Err(reason) => {
-                    crate::stock_fallback::request(format!(
-                        "IrRewriteMaxPool2d: {}: {reason}",
-                        ctx.node(id).name
-                    ));
-                    break;
-                }
-            }
-        }
-        if modified {
-            ctx.finish();
-        }
-        modified
+        run_planned_rewrites(graph, self.name(), is_target, plan, rewrite)
     }
 }
 

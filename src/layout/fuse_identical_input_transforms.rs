@@ -49,7 +49,7 @@ use std::collections::HashMap;
 
 use crate::fx_ir::{broadcast_shapes, i64_list_arg, shape_product, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
 use crate::fx_meta::TensorFacts;
-use crate::layout::ctx::{LayoutCtx, RuleId};
+use crate::layout::ctx::{has_target_op, LayoutCtx, RuleId};
 use crate::layout::dim_maps::{PermuteMap, ViewMap};
 use crate::layout::fx_node::{all_input_nodes, py_eq};
 use crate::layout::shape::{int_list, mark_contiguous, refreshed_meta};
@@ -168,12 +168,7 @@ impl IrPass for IrFuseIdenticalInputTransformsPass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        // `ArmOpTargetedPass.should_run_pass` (backends/arm/_passes/arm_pass.py:295-305).
-        if !graph
-            .live_call_function_ids()
-            .into_iter()
-            .any(|id| is_target_op(graph, id))
-        {
+        if !has_target_op(graph, |node| is_target_op(graph, node.id)) {
             return false;
         }
         let mut ctx = LayoutCtx::new(graph);

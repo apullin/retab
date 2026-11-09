@@ -10,6 +10,35 @@ checkout can't shadow the installed package:
 
     cd /tmp && <venv>/bin/python -P <retab>/tests/fixtures/layout_replay/gen_layout_replay.py
 
+Except for the fixtures that run RemovePermutesAroundElementwiseTosaOps: the
+remove-permutes fixtures (`remove_permutes_around_elementwise` and
+`remove_permutes_user_order`) and the propagation fixtures that build the
+passes with the exported program, whose fusion pass it is
+(`propagate_view_copy_permute_down`, `_up` and `_down_up`). RETAB's port
+follows two upstream fixes rc4 lacks: it compensates lower-rank constants as
+#24315 does (rc4 reshapes them where a transpose is needed, or raises), and it
+keeps the permutes of a region in which a node broadcasts operands of
+different rank, as #24469's guard does (rc4 rewrites it into a differently
+shaped result), except where the node is a TABLE, which never broadcasts its
+lookup table. So these record rc4 with those fixes, as backported to
+release/1.6: c3172c0028, branch retab/pick-1.6/guard-table-exemption of
+github.com/apullin/executorch, which exempts TABLE from the guard of
+8c5df6f460 (branch retab/pick-1.6/mixed-rank-broadcast-guard), itself stacked
+on the #24315 backport (52ecaaf136), and which keeps only a TABLE's table out
+of the constant edges, where rc4 drops every constant input of a TABLE.
+Generate them from a checkout of that commit, with the installed wheel's
+build artifacts linked into its `src/executorch`, ahead of the installed
+package:
+
+    cd /tmp && PYTHONPATH=<checkout>/src <venv>/bin/python -P <retab>/tests/fixtures/layout_replay/gen_layout_replay.py \
+        --pass remove_permutes_around_elementwise --pass remove_permutes_user_order \
+        --pass propagate_view_copy_permute_down --pass propagate_view_copy_permute_up \
+        --pass propagate_view_copy_permute_down_up
+
+A fixture generated from a checkout says so in its header: its regenerate line
+is the command above for that fixture alone, `executorch sources:` names the
+commit, and the source hashes are those of the files it ran.
+
 Options: `--pass NAME` writes one fixture (repeat it for several), `--random N`
 and `--seed S` change the random cases, `--out DIR` writes elsewhere, `--case
 NAME` prints one case (of `--pass`). The output is stable for a given torch, ExecuTorch and CPython
@@ -165,6 +194,7 @@ import logging
 import math
 import os
 import random
+import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -5056,7 +5086,8 @@ def remove_permutes_cases():
         b.output([b.permute(a, [0, 2, 1])])
 
     @case
-    def lower_rank_constant_with_a_moved_dim_raises(b):
+    def lower_rank_constant_with_a_moved_dim_is_transposed(b):
+        # rc4 reshapes [5, 3] to [1, 5] and raises; #24315 views and permutes.
         x = b.input("x", X4)
         c = b.constant("buffer", "c", (5, 3))
         a = b.call(A.mul.Tensor, b.permute(x, TO_NHWC), c)
@@ -7662,23 +7693,50 @@ PASSES = [
 COMMON_SOURCES = ["backends/arm/_passes/arm_pass.py", "exir/pass_base.py"]
 
 
+def source_root() -> Path:
+    # `executorch` is a namespace package: a checkout's `src/executorch` on
+    # PYTHONPATH supplies the sources ahead of the installed package.
+    return Path(executorch.backends.__file__).parent.parent
+
+
 def source_sha256(relative: str) -> str:
-    # `executorch` is a namespace package; `executorch.version` sits at its root.
-    root = Path(executorch.version.__file__).resolve().parent
-    return hashlib.sha256((root / relative).read_bytes()).hexdigest()
+    return hashlib.sha256((source_root() / relative).read_bytes()).hexdigest()
+
+
+def source_checkout_line() -> list[str]:
+    """The header line naming the checkout the sources came from, if they did
+    not come from the installed package (whose version line names its commit)."""
+    installed = Path(executorch.version.__file__).resolve().parent
+    if source_root().resolve() == installed:
+        return []
+    git = subprocess.run(
+        ["git", "-C", str(source_root().resolve()), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return [f"# executorch sources: git {git or 'unknown'}, a checkout ahead of the installed package"]
 
 
 def header(
     spec: PassSpec, seed: int, random_cases: int, skipped: int, rc4_pass: str
 ) -> list[str]:
     git = getattr(executorch.version, "git_version", "unknown")
+    checkout = source_checkout_line()
+    # A fixture generated from a checkout is regenerated from one (see the docstring).
+    command = (
+        "#   cd /tmp && PYTHONPATH=<checkout>/src <venv>/bin/python -P"
+        f" <retab>/tests/fixtures/layout_replay/gen_layout_replay.py --pass {spec.name}"
+        if checkout
+        else "#   cd /tmp && <venv>/bin/python -P <retab>/tests/fixtures/layout_replay/gen_layout_replay.py"
+    )
     lines = [
         f"# rc4 {rc4_pass} before/after graphs for src/layout/replay.rs.",
         "# Generated by tests/fixtures/layout_replay/gen_layout_replay.py; don't edit by hand.",
         "# Regenerate with the rc4 environment, from a neutral directory:",
-        "#   cd /tmp && <venv>/bin/python -P <retab>/tests/fixtures/layout_replay/gen_layout_replay.py",
+        command,
         f"# executorch {executorch.version.__version__} (git {git}), torch {torch.__version__},"
         f" python {sys.version.split()[0]}",
+        *checkout,
         f"# seed {seed}: {random_cases} random graphs, {skipped} of which torch rejected;"
         " format: see the generator's docstring.",
     ]

@@ -5,6 +5,7 @@ use crate::fx_ir::{IrArg, IrGraph, IrNode, NodeOp, QParam, TensorSource};
 use crate::fx_target::{shape_only_constant_target, ShapeOnlyConstantTarget};
 use crate::graph::ir::{DType, QuantArgs};
 use crate::lowering_effects::LoweringInputKind;
+use crate::permutation::{is_identity_permutation, permute_by};
 use crate::store::TensorData;
 
 pub fn tensor_numel(shape: &[i64]) -> Option<usize> {
@@ -761,7 +762,7 @@ pub fn permute_tensor_data(input: &TensorData, order: &[usize]) -> Option<Tensor
     if rank != order.len() {
         return None;
     }
-    if order.iter().enumerate().all(|(idx, &axis)| idx == axis) {
+    if is_identity_permutation(order) {
         return Some(input.clone());
     }
     let mut seen = vec![false; rank];
@@ -776,7 +777,7 @@ pub fn permute_tensor_data(input: &TensorData, order: &[usize]) -> Option<Tensor
     if numel.saturating_mul(elem_size) != input.data.len() {
         return None;
     }
-    let new_shape: Vec<i64> = order.iter().map(|&axis| input.shape[axis]).collect();
+    let new_shape = permute_by(&input.shape, order);
     if numel == 0 || elem_size == 0 {
         return Some(TensorData {
             data: input.data.clone(),
@@ -1223,6 +1224,112 @@ pub fn plan_constant_comparison_tensors(
     })
 }
 
+/// A bool-valued logical op that [`plan_constant_logical_tensor`] folds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogicalOp {
+    Not,
+    And,
+    Or,
+    Xor,
+}
+
+/// The logical op `node` computes, for the folds: `aten.logical_not`, `and`,
+/// `or` and `xor`, and the bitwise ops with a bool value. rc4's
+/// RewriteBoolBitwiseToLogicalPass (`arm_pass_manager.py:676`) makes those
+/// logical before its folds run (`:699-700`); RETAB keeps them bitwise and the
+/// serializer emits them as LOGICAL ops.
+pub fn logical_op(node: &IrNode) -> Option<LogicalOp> {
+    let op = match node.target.as_str() {
+        "aten.logical_not.default" => return Some(LogicalOp::Not),
+        "aten.logical_and.default" => return Some(LogicalOp::And),
+        "aten.logical_or.default" => return Some(LogicalOp::Or),
+        "aten.logical_xor.default" => return Some(LogicalOp::Xor),
+        "aten.bitwise_not.default" => LogicalOp::Not,
+        "aten.bitwise_and.Tensor" => LogicalOp::And,
+        "aten.bitwise_or.Tensor" => LogicalOp::Or,
+        "aten.bitwise_xor.Tensor" => LogicalOp::Xor,
+        _ => return None,
+    };
+    (node.meta.val_dtype() == Some("torch.bool")).then_some(op)
+}
+
+/// Each element's truth value as torch's logical ops read it: nonzero, NaN
+/// included, is true.
+fn truth_values(tensor: &TensorData) -> Option<Vec<bool>> {
+    match tensor.dtype {
+        DType::Bool | DType::Int8 | DType::Int16 | DType::Int32 | DType::Int64 => Some(
+            tensor
+                .vec_i64()?
+                .into_iter()
+                .map(|value| value != 0)
+                .collect(),
+        ),
+        DType::Float32 | DType::Float16 | DType::BFloat16 => Some(
+            tensor
+                .vec_f64()?
+                .into_iter()
+                .map(|value| value != 0.0)
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+/// Fold a logical op ([`logical_op`]) whose tensor inputs, one for `Not` and
+/// two otherwise, are all constant. rc4's FuseConstantArgs folds every op
+/// whose inputs are all constants (`fuse_constant_ops_pass.py`), so the
+/// LOGICAL_XOR and LOGICAL_NOT that a bool eq of two constants becomes fold
+/// to one constant there. The inputs' truth values broadcast as the
+/// comparison planner's operands do, and the fold keeps rc4's rule that the
+/// result must not hold more elements than the node's value. Like the
+/// comparison planner, a node with qparams stays a runtime op.
+pub fn plan_constant_logical_tensor(
+    node: &IrNode,
+    op: LogicalOp,
+    inputs: &[&TensorData],
+) -> Option<TensorData> {
+    if node.meta.input_qparams().is_some() || node.meta.output_qparams().is_some() {
+        return None;
+    }
+    let arity = if op == LogicalOp::Not { 1 } else { 2 };
+    if inputs.len() != arity {
+        return None;
+    }
+    let shapes: Vec<Vec<i64>> = inputs.iter().map(|input| input.shape.clone()).collect();
+    let shape = crate::fx_ir::broadcast_shapes(&shapes)?;
+    let numel = tensor_numel(&shape)?;
+    if let Some(fake) = node.meta.val_shape() {
+        if numel > tensor_numel(fake)? {
+            return None;
+        }
+    }
+    let values = inputs
+        .iter()
+        .map(|input| truth_values(input))
+        .collect::<Option<Vec<_>>>()?;
+    let value_at = |input: usize, idx: usize| -> Option<bool> {
+        let offset = broadcast_offset(idx, &shape, &inputs[input].shape)?;
+        values[input].get(offset).copied()
+    };
+    let mut data = Vec::with_capacity(numel);
+    for idx in 0..numel {
+        let lhs = value_at(0, idx)?;
+        let rhs = if arity == 2 { value_at(1, idx)? } else { false };
+        let result = match op {
+            LogicalOp::Not => !lhs,
+            LogicalOp::And => lhs && rhs,
+            LogicalOp::Or => lhs || rhs,
+            LogicalOp::Xor => lhs != rhs,
+        };
+        data.push(u8::from(result));
+    }
+    Some(TensorData {
+        data,
+        shape,
+        dtype: DType::Bool,
+    })
+}
+
 fn per_tensor_quant_args(qp: &QParam) -> Option<QuantArgs> {
     if qp.is_per_channel() {
         return None;
@@ -1578,6 +1685,150 @@ mod tests {
         let lhs = node_tensor(&graph, 0);
         let rhs = node_tensor(&graph, 1);
         assert!(plan_constant_comparison_tensors(graph.node(id), &lhs, &rhs).is_none());
+    }
+
+    fn bool_tensor(shape: Vec<i64>, values: &[bool]) -> TensorData {
+        TensorData {
+            data: values.iter().map(|&value| u8::from(value)).collect(),
+            shape,
+            dtype: DType::Bool,
+        }
+    }
+
+    fn logical_node(target: &str, shape: Vec<i64>, dtype: &str) -> IrNode {
+        let mut graph = IrGraph::empty();
+        let id = graph.add_node(
+            NodeOp::CallFunction,
+            "logical".to_string(),
+            target.to_string(),
+            Vec::new(),
+            NodeMeta::tensor(shape, dtype),
+        );
+        graph.node(id).clone()
+    }
+
+    /// The logical ops fold whatever their value; a bitwise op folds as one
+    /// only with a bool value, as rc4 rewrites only those (APM:676).
+    #[test]
+    fn logical_op_reads_logical_targets_and_bool_bitwise_ones() {
+        for (target, op) in [
+            ("aten.logical_not.default", LogicalOp::Not),
+            ("aten.logical_and.default", LogicalOp::And),
+            ("aten.logical_or.default", LogicalOp::Or),
+            ("aten.logical_xor.default", LogicalOp::Xor),
+        ] {
+            for dtype in ["torch.bool", "torch.int8"] {
+                assert_eq!(
+                    logical_op(&logical_node(target, vec![2], dtype)),
+                    Some(op),
+                    "{target} {dtype}"
+                );
+            }
+        }
+        for (target, op) in [
+            ("aten.bitwise_not.default", LogicalOp::Not),
+            ("aten.bitwise_and.Tensor", LogicalOp::And),
+            ("aten.bitwise_or.Tensor", LogicalOp::Or),
+            ("aten.bitwise_xor.Tensor", LogicalOp::Xor),
+        ] {
+            assert_eq!(
+                logical_op(&logical_node(target, vec![2], "torch.bool")),
+                Some(op),
+                "{target}"
+            );
+            assert_eq!(
+                logical_op(&logical_node(target, vec![2], "torch.int32")),
+                None,
+                "{target}"
+            );
+        }
+        for target in [
+            "aten.bitwise_and.Scalar",
+            "aten.eq.Tensor",
+            "aten.where.self",
+        ] {
+            assert_eq!(
+                logical_op(&logical_node(target, vec![2], "torch.bool")),
+                None,
+                "{target}"
+            );
+        }
+    }
+
+    /// rc4's test_eq.py `eq_bool` operands, [3, 1] and [1, 3]: the
+    /// LOGICAL_XOR and LOGICAL_NOT a bool eq of two constants becomes fold to
+    /// the eq's values.
+    #[test]
+    fn logical_folds_broadcast_xor_then_not_to_the_eq() {
+        let lhs = bool_tensor(vec![3, 1], &[true, false, true]);
+        let rhs = bool_tensor(vec![1, 3], &[true, false, true]);
+        let xor = logical_node("aten.logical_xor.default", vec![3, 3], "torch.bool");
+        let xored = plan_constant_logical_tensor(&xor, LogicalOp::Xor, &[&lhs, &rhs]).expect("xor");
+        assert_eq!(xored.dtype, DType::Bool);
+        assert_eq!(xored.shape, vec![3, 3]);
+        assert_eq!(xored.data, vec![0, 1, 0, 1, 0, 1, 0, 1, 0]);
+
+        let not = logical_node("aten.logical_not.default", vec![3, 3], "torch.bool");
+        let eq = plan_constant_logical_tensor(&not, LogicalOp::Not, &[&xored]).expect("not");
+        assert_eq!(eq.shape, vec![3, 3]);
+        assert_eq!(eq.data, vec![1, 0, 1, 0, 1, 0, 1, 0, 1]);
+    }
+
+    /// torch's logical ops read any dtype's nonzero values, NaN included,
+    /// as true.
+    #[test]
+    fn logical_folds_truth_values_of_numeric_inputs() {
+        let ints = int32_tensor(vec![4], &[0, 2, -1, 0]);
+        let floats = TensorData {
+            data: [0.0f32, f32::NAN, 0.5, -0.0]
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
+            shape: vec![4],
+            dtype: DType::Float32,
+        };
+        for (target, op, expected) in [
+            ("aten.logical_and.default", LogicalOp::And, [0, 1, 1, 0]),
+            ("aten.logical_or.default", LogicalOp::Or, [0, 1, 1, 0]),
+            ("aten.logical_xor.default", LogicalOp::Xor, [0, 0, 0, 0]),
+        ] {
+            let node = logical_node(target, vec![4], "torch.bool");
+            let output = plan_constant_logical_tensor(&node, op, &[&ints, &floats]).expect(target);
+            assert_eq!(output.data, expected, "{target}");
+        }
+        let not = logical_node("aten.logical_not.default", vec![4], "torch.bool");
+        let output = plan_constant_logical_tensor(&not, LogicalOp::Not, &[&floats]).expect("not");
+        assert_eq!(output.data, vec![1, 0, 0, 1]);
+    }
+
+    /// A node with qparams, a result larger than the node's value, a wrong
+    /// operand count or shapes that do not broadcast stay runtime ops.
+    #[test]
+    fn logical_leaves_quantized_growing_and_malformed_nodes() {
+        let a = bool_tensor(vec![2], &[true, false]);
+        let b = bool_tensor(vec![2], &[false, false]);
+
+        let mut quantized = logical_node("aten.logical_and.default", vec![2], "torch.bool");
+        quantized.meta.set_single_input_qparam(QParam::per_tensor(
+            0.5,
+            0,
+            -128,
+            127,
+            "torch.int8".to_string(),
+        ));
+        assert!(plan_constant_logical_tensor(&quantized, LogicalOp::And, &[&a, &b]).is_none());
+
+        let column = bool_tensor(vec![2, 1], &[true, false]);
+        let small = logical_node("aten.logical_or.default", vec![2], "torch.bool");
+        assert!(plan_constant_logical_tensor(&small, LogicalOp::Or, &[&column, &a]).is_none());
+
+        let xor = logical_node("aten.logical_xor.default", vec![2], "torch.bool");
+        assert!(plan_constant_logical_tensor(&xor, LogicalOp::Xor, &[&a]).is_none());
+        let not = logical_node("aten.logical_not.default", vec![2], "torch.bool");
+        assert!(plan_constant_logical_tensor(&not, LogicalOp::Not, &[&a, &b]).is_none());
+
+        let three = bool_tensor(vec![3], &[true, true, true]);
+        assert!(plan_constant_logical_tensor(&xor, LogicalOp::Xor, &[&a, &three]).is_none());
     }
 
     #[test]

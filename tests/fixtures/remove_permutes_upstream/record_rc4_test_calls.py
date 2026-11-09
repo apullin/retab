@@ -16,9 +16,14 @@ replay fixture does). The TOSA subclass's graph-signature constants are marked
 with the val fake execution gives them, which does not change what the pass
 does there.
 
-Usage, with the rc4 environment and the rc4 source tree:
+The source tree is rc4 with the release/1.6 backports of #24315 and of
+#24469's mixed-rank broadcast guard, and the guard's TABLE exemption, which
+add six tests and the fixes RETAB's port follows (see
+tests/fixtures/layout_replay/gen_layout_replay.py's docstring). The pass must
+come from the tree whose tests run, so put its `src` on PYTHONPATH. Usage,
+with the rc4 environment:
 
-    cd /tmp && <venv>/bin/python -P <retab>/tests/fixtures/remove_permutes_upstream/record_rc4_test_calls.py <executorch-1.6>
+    cd /tmp && PYTHONPATH=<checkout>/src <venv>/bin/python -P <retab>/tests/fixtures/remove_permutes_upstream/record_rc4_test_calls.py <checkout>
 """
 
 import shutil
@@ -36,6 +41,7 @@ SELECT = "RemovePermutes or remove_permutes or LayoutPermute or constant_input_c
 
 CONFTEST = '''
 import sys
+from pathlib import Path
 
 import pytest
 import torch
@@ -46,6 +52,11 @@ import gen_layout_replay as G  # noqa: E402  pins the edge sets
 
 from executorch.backends.transforms.remove_permutes_around_elementwise_ops import (  # noqa: E402
     RemovePermutesAroundElementwiseOps as R,
+)
+
+_PASS_FILE = Path(sys.modules[R.__module__].__file__).resolve()
+assert _PASS_FILE.is_relative_to(Path({source!r}).resolve()), (
+    f"the pass comes from {{_PASS_FILE}}; put the tree whose tests run on PYTHONPATH"
 )
 
 RECORDS = []
@@ -121,7 +132,9 @@ def main() -> None:
             shutil.copy(source / test, work / Path(test).name)
         (work / "conftest.py").write_text(
             CONFTEST.format(
-                layout_replay=str(HERE.parent / "layout_replay"), out=str(work / "calls.txt")
+                layout_replay=str(HERE.parent / "layout_replay"),
+                out=str(work / "calls.txt"),
+                source=str(source),
             )
         )
         command = [
@@ -129,9 +142,13 @@ def main() -> None:
             "--rootdir", str(work), *[Path(t).name for t in TESTS], "-k", SELECT,
         ]
         subprocess.run(command, cwd=work, check=True)
+        commit = subprocess.run(
+            ["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True, text=True
+        ).stdout.strip()
         header = [
             "# The graphs rc4's RemovePermutesAroundElementwiseOps tests hand the pass, and what it returns.",
             "# Recorded by tests/fixtures/remove_permutes_upstream/record_rc4_test_calls.py; don't edit by hand.",
+            f"# executorch sources: git {commit or 'unknown'}",
         ]
         out.write_text("\n".join(header) + "\n" + (work / "calls.txt").read_text())
     print(f"wrote {out}")

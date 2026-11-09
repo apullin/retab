@@ -14,7 +14,7 @@
 //! F2). `layout::dtype::value_dtype` reads that val, so the layout passes see an
 //! int32 accumulator before the RESCALE, as rc4's
 //! MoveDataMovementOpsToSmallerDtypePass does. Ingest types the accumulator
-//! int32 too (`is_accumulator_op`, `ingest/finalize.rs`).
+//! int32 too (`ingest/finalize.rs`, `op_semantics::is_accumulator_output`).
 
 use crate::fx_ir::{IrGraph, IrPass, NodeId, NodeOp, RescaleRewrite};
 use crate::layout::dtype;

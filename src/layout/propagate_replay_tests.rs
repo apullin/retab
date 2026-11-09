@@ -7,7 +7,13 @@
 //! compared. The generator turns quantized table ops into TABLE ops before
 //! the passes and back after (`PropagationPass`), so the fixtures show rc4's
 //! decisions in RETAB's form, a 16-bit table split from its RESCALE where rc4
-//! keeps them apart (`layout::pending`).
+//! keeps them apart (`layout::pending`). Those three fixtures record rc4 with
+//! the release/1.6 backports of #24315 and of #24469's mixed-rank broadcast
+//! guard, and the guard's TABLE exemption stacked on them, which the passes'
+//! RemovePermutes port follows (see the generator's docstring). Their cases
+//! are the same as with rc4 alone: the guard skips TABLE, so a TABLE's rank-1
+//! table, which the TOSA subclass drops from the constant edges, keeps no
+//! region's permutes.
 
 use crate::fx_ir::{IrGraph, IrPass};
 use crate::layout::propagate::{Direction, IrPropagateViewCopyPermutePass, PropagateConfig};

@@ -8,9 +8,6 @@ use crate::fx_decompose_cumsum_ir;
 use crate::fx_decompose_logit_ir;
 use crate::fx_decompose_masked_fill_ir;
 use crate::fx_decompose_ne_ir;
-use crate::fx_decompose_pixel_shuffle_ir;
-use crate::fx_decompose_repeat_interleave_ir;
-use crate::fx_decompose_tril_ir;
 use crate::fx_remove_noop_ir;
 use crate::fx_replace_inf_values_ir;
 use crate::fx_replace_scalar_with_tensor_ir;
@@ -58,6 +55,15 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         // -- Pre-fold --
         Ir(Box::new(
             crate::fx_fuse_quant_activation_ir::IrFuseQuantActivationPass,
+        )),
+        // PrepareGatherIndicesPass (APM:548): a delegated gather reads its int32
+        // indices instead of the int64 cast in front of them, whose tensor TOSA 1.0
+        // can't hold (APU-167). rc4 runs it between FuseQuantizedActivation (:545) and
+        // ConvertToClamp (:550); of the passes in between, DecomposeTopK (:547) and
+        // RewriteBoolToFp32CastViaInt8 (:546) never fire for INT specs, and RETAB runs
+        // CanonicalizeGather (:549) after the fold.
+        Ir(Box::new(
+            crate::fx_prepare_gather_indices_ir::IrPrepareGatherIndicesPass::new(config),
         )),
         Ir(Box::new(fx_convert_clamp_ir::IrConvertClampPass)),
         Ir(Box::new(
@@ -153,15 +159,11 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
             },
         )),
         Ir(Box::new(
-            crate::fx_decompose_select_scatter_ir::IrDecomposeSelectScatterPass,
-        )),
-        Ir(Box::new(
             crate::fx_decompose_slice_scatter_ir::IrDecomposeSliceScatterPass,
         )),
         Ir(Box::new(
             crate::fx_decompose_strided_slice_ir::IrDecomposeStridedSlicePass,
         )),
-        Ir(Box::new(fx_decompose_tril_ir::IrDecomposeTrilPass)),
         Ir(Box::new(fx_decompose_logit_ir::IrDecomposeLogitPass)),
         Ir(Box::new(fx_decompose_ne_ir::IrDecomposeNotEqualPass)),
         Ir(Box::new(
@@ -173,12 +175,6 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         Ir(Box::new(fx_decompose_addmm_ir::IrDecomposeAddmmPass)),
         Ir(Box::new(fx_decompose_cumsum_ir::IrDecomposeCumsumPass)),
         Ir(Box::new(
-            fx_decompose_repeat_interleave_ir::IrDecomposeRepeatInterleavePass,
-        )),
-        Ir(Box::new(
-            fx_decompose_pixel_shuffle_ir::IrDecomposePixelShufflePass,
-        )),
-        Ir(Box::new(
             fx_decompose_as_strided_copy_ir::IrDecomposeAsStridedCopyPass,
         )),
         Ir(Box::new(
@@ -187,19 +183,19 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         Ir(Box::new(fx_convert_full_like_ir::IrConvertFullLikePass)),
         // APM:664, right after ConvertFullLikeToFull (APM:661); design C3. SELECT gets a
         // `where` mask rank-matched here, which it broadcasts (APU-161). RETAB runs its
-        // avg-pool, var and mean decompositions after this slot, where rc4 runs them
-        // before (critique B9); phase-6 slot 7 rank-matches what they create.
+        // avg-pool and mean decompositions after this slot, where rc4 runs them before
+        // (critique B9); phase-6 slot 7 rank-matches what they create.
         Ir(Box::new(
             crate::layout::match_arg_ranks::IrMatchArgRanksPass,
         )),
-        Effectful(Box::new(
-            crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEffectPass,
-        )),
-        Effectful(Box::new(
-            crate::fx_fuse_shape_only_constants_ir::IrFuseShapeOnlyConstantsEffectPass,
-        )),
-        Effectful(Box::new(
-            crate::fx_fuse_constant_inputs_ir::IrFuseConstantInputsEffectPass::matmul_only(),
+        // DecomposeBoolEqualityPass (APM:672): a bool eq becomes
+        // logical_not(logical_xor), since TOSA's EQUAL takes no bool inputs (APU-123).
+        // rc4 runs it right after DecomposeNotEqual (APM:671). RETAB runs
+        // IrDecomposeNotEqual earlier, before IrReplaceScalarWithTensor, so the eq a
+        // bool ne leaves still reaches this slot. It follows IrMatchArgRanks, so
+        // logical_xor reads rank-matched operands.
+        Ir(Box::new(
+            crate::fx_decompose_bool_equality_ir::IrDecomposeBoolEqualityPass,
         )),
         Ir(Box::new(
             crate::fx_decompose_adaptive_avgpool_ir::IrDecomposeAdaptiveAvgPoolPass,
@@ -220,7 +216,6 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         )));
     }
     steps.extend(vec![
-        Ir(Box::new(crate::fx_decompose_var_ir::IrDecomposeVarPass)),
         Ir(Box::new(crate::fx_decompose_mean_ir::IrDecomposeMeanPass)),
         Ir(Box::new(fx_convert_sum_ir::IrConvertBoolSumPass)),
         Ir(Box::new(
@@ -543,6 +538,21 @@ mod tests {
                     assert_eq!(count("IrNormalizeDelegateIOLayout"), 1, "{spec}");
                 }
 
+                // APM:548, PrepareGatherIndices, between FuseQuantizedActivation (:545)
+                // and ConvertToClamp (:550), before RETAB's CanonicalizeGather (:549).
+                let prepare = position("IrPrepareGatherIndices");
+                assert_eq!(
+                    &names[prepare - 1..prepare + 2],
+                    [
+                        "IrFuseQuantActivation",
+                        "IrPrepareGatherIndices",
+                        "IrConvertClamp"
+                    ],
+                    "{spec}"
+                );
+                assert_eq!(count("IrPrepareGatherIndices"), 1, "{spec}");
+                assert!(prepare < position("IrCanonicalizeGather"), "{spec}");
+
                 // APM:586-592: FuseConsecutiveClamps, FuseDuplicateUsers, then
                 // FuseIdenticalInputTransforms right before DecomposeLinear (RETAB
                 // decomposes flip and roll there too).
@@ -561,6 +571,13 @@ mod tests {
                 );
                 assert_eq!(count("IrFuseIdenticalInputTransforms"), 1, "{spec}");
                 assert!(position("IrFuseConsecutiveClamps") < position("IrQuantizeClampArgs"));
+
+                // APM:553-554: DecomposeLayerNorm, then DecomposeVar, once. The var
+                // nodes the layer norm decomposition creates are the only ones a step
+                // creates.
+                let layer_norm = position("IrDecomposeLayerNorm");
+                assert_eq!(names[layer_norm + 1], "IrDecomposeVar", "{spec}");
+                assert_eq!(count("IrDecomposeVar"), 1, "{spec}");
 
                 // The control-flow RESCALE targets, recorded right before the fold
                 // (rc4 reads them at APM:595, from FoldAndAnnotate's annotation).
@@ -593,6 +610,12 @@ mod tests {
                 assert_eq!(names[full_like + 1], "IrMatchArgRanks", "{spec}");
                 assert_eq!(count("IrMatchArgRanks"), 2, "{spec}");
 
+                // APM:672, DecomposeBoolEquality, right after that IrMatchArgRanks, and
+                // after IrDecomposeNotEqual, which RETAB runs before the scalar rewrite.
+                assert_eq!(names[full_like + 2], "IrDecomposeBoolEquality", "{spec}");
+                assert_eq!(count("IrDecomposeBoolEquality"), 1, "{spec}");
+                assert!(position("IrDecomposeNotEqual") < full_like, "{spec}");
+
                 // APM:695-700: SizeAdjustInput, RewriteAvgPool2d, then the constant
                 // folds in the IR.
                 let size_adjust = position("IrSizeAdjustInput");
@@ -609,9 +632,19 @@ mod tests {
                 assert!(position("IrInsertTableOpsEp") < size_adjust);
                 assert_eq!(
                     count("IrFuseConstantInputsEp"),
-                    2,
-                    "{spec}: matmul_only twice"
+                    1,
+                    "{spec}: matmul_only once, after phase 6"
                 );
+                // The constant effect passes run only after IrMaterializeConstants,
+                // which folds what they would plan before it under new names.
+                let materialize = position("IrMaterializeConstants");
+                for pass in [
+                    "IrFuseZeroInputConstantsEp",
+                    "IrFuseShapeOnlyConstantsEp",
+                    "IrFuseConstantInputsEp",
+                ] {
+                    assert!(materialize < position(pass), "{spec}: {pass}");
+                }
 
                 // The phase-6 block, once, after the late IrRemoveNoop.
                 let phase6 = position("IrRewriteUpsample");
@@ -670,8 +703,8 @@ mod tests {
     }
 
     /// A `where` whose mask has a lower rank than its operands, through the steps from
-    /// IrDecomposeStridedSlice to the constant effects after IrConvertFullLike, which
-    /// hold IrMatchArgRanks (APM:664). The pipeline only rank-matches the mask, as rc4
+    /// IrDecomposeStridedSlice up to IrDecomposeAdaptiveAvgPool, which hold
+    /// IrMatchArgRanks (APM:664). The pipeline only rank-matches the mask, as rc4
     /// does for SELECT, which broadcasts it, rather than tiling it to the output shape
     /// (APU-161).
     #[test]
@@ -707,7 +740,7 @@ mod tests {
                     .unwrap_or_else(|| panic!("{pass} missing"))
             };
             let start = position("IrDecomposeStridedSlice", 0);
-            let end = position("IrFuseZeroInputConstantsEp", start);
+            let end = position("IrDecomposeAdaptiveAvgPool", start);
             run_steps(&steps[start..end], &mut graph);
             graph
         }
@@ -727,6 +760,204 @@ mod tests {
         assert_eq!(mask.target, "aten.view_copy.default");
         assert_eq!(graph.node_shape(mask.id), Some([1, 2, 5].as_slice()));
         assert_eq!(mask.arg_node(0), Some(live_node(&graph, "mask").id));
+    }
+
+    /// A bool ne and a bool eq with a lower-rank operand, through the same steps as
+    /// above, in the parent and in a region (APU-123). Neither reaches the serializer
+    /// as EQUAL, which TOSA defines for numeric inputs only: as in rc4,
+    /// IrDecomposeNotEqual makes the ne logical_not(eq), IrMatchArgRanks views the
+    /// eq's [4] operand to [1, 1, 4], and IrDecomposeBoolEquality (APM:672) splits
+    /// each eq into logical_xor and logical_not.
+    #[test]
+    fn bool_eq_and_ne_lower_to_logical_ops_in_parent_and_regions() {
+        use crate::fx_ir::{IrArg, IrGraph};
+        use crate::test_ir::{call, live_node, output, placeholder};
+
+        fn step_name(step: &PipelineStep) -> &str {
+            match step {
+                PipelineStep::Ir(pass) => pass.name(),
+                PipelineStep::Effectful(pass) => pass.name(),
+            }
+        }
+
+        // U85's spec (`EthosUCompileSpec._tosa_spec_for_target`).
+        let config = PipelineConfig::from_tosa_spec("TOSA-1.0+INT+int16+int4+cf");
+        for steps in [
+            lowering_steps(true, &config),
+            build_ir_cond_submodule_pipeline(&config),
+        ] {
+            let mut graph = IrGraph::empty();
+            let a = placeholder(&mut graph, "a", [2, 3, 4], "torch.bool");
+            let b = placeholder(&mut graph, "b", [4], "torch.bool");
+            let c = placeholder(&mut graph, "c", [2, 3, 4], "torch.bool");
+            let eq = call(
+                &mut graph,
+                "eq",
+                "aten.eq.Tensor",
+                vec![IrArg::Node(a), IrArg::Node(b)],
+                [2, 3, 4],
+                "torch.bool",
+            );
+            let ne = call(
+                &mut graph,
+                "ne",
+                "aten.ne.Tensor",
+                vec![IrArg::Node(eq), IrArg::Node(c)],
+                [2, 3, 4],
+                "torch.bool",
+            );
+            output(&mut graph, ne);
+
+            let position = |pass: &str, from: usize| {
+                from + steps[from..]
+                    .iter()
+                    .position(|step| step_name(step) == pass)
+                    .unwrap_or_else(|| panic!("{pass} missing"))
+            };
+            let start = position("IrDecomposeStridedSlice", 0);
+            let end = position("IrDecomposeAdaptiveAvgPool", start);
+            run_steps(&steps[start..end], &mut graph);
+
+            assert!(!graph
+                .live_nodes()
+                .any(|node| matches!(node.target.as_str(), "aten.eq.Tensor" | "aten.ne.Tensor")));
+            let arg = |name: &str, index: usize| {
+                graph.node(
+                    live_node(&graph, name).args[index]
+                        .as_node()
+                        .expect("a node"),
+                )
+            };
+            // The eq: logical_xor(a, view(b)), then logical_not.
+            let eq_xor = live_node(&graph, "eq_logical_xor");
+            assert_eq!(eq_xor.target, "aten.logical_xor.default");
+            assert_eq!(arg("eq_logical_xor", 0).name, "a");
+            let view = arg("eq_logical_xor", 1);
+            assert_eq!(view.target, "aten.view_copy.default");
+            assert_eq!(graph.node_shape(view.id), Some([1, 1, 4].as_slice()));
+            assert_eq!(arg("eq_logical_not", 0).name, "eq_logical_xor");
+            // The ne: logical_not(logical_not(logical_xor(eq, c))).
+            assert_eq!(arg("ne_eq_logical_xor", 0).name, "eq_logical_not");
+            assert_eq!(arg("ne_eq_logical_xor", 1).name, "c");
+            assert_eq!(arg("ne_eq_logical_not", 0).name, "ne_eq_logical_xor");
+            assert_eq!(arg("ne_logical_not", 0).name, "ne_eq_logical_not");
+            let out = graph
+                .live_nodes()
+                .find(|node| node.op == crate::fx_ir::NodeOp::Output)
+                .expect("an output");
+            assert_eq!(
+                out.args[0].as_node(),
+                Some(live_node(&graph, "ne_logical_not").id)
+            );
+        }
+    }
+
+    /// rc4's TopKGather delegate on TOSA-1.0+INT and Ethos-U85 (APU-167): the int32
+    /// topk indices come in, are unsqueezed and expanded, and an int64 cast feeds the
+    /// gather. Through the whole parent and cond-region pipelines the cast goes, and
+    /// the gather becomes TOSA's GATHER on the expanded int32 indices, as stock's
+    /// does. Before IrPrepareGatherIndices (APM:548) the cast reached the
+    /// serializer, which refuses its INT64 tensor.
+    #[test]
+    fn topk_gather_indices_reach_tosa_gather_as_int32_in_parent_and_regions() {
+        use std::collections::HashMap;
+
+        use crate::fx_ir::{IrArg, IrGraph, NodeId, NodeMeta, NodeOp};
+        use crate::layout::shape::mark_contiguous;
+        use crate::test_ir::{call_with_meta, output, placeholder};
+
+        fn value(shape: &[i64], dtype: &str) -> NodeMeta {
+            let mut meta = NodeMeta::tensor(shape.to_vec(), dtype);
+            mark_contiguous(&mut meta);
+            meta
+        }
+        fn input(graph: &mut IrGraph, name: &str, shape: &[i64], dtype: &str) -> NodeId {
+            let id = placeholder(graph, name, shape.to_vec(), dtype);
+            mark_contiguous(&mut graph.node_mut(id).meta);
+            id
+        }
+
+        for spec in ["TOSA-1.0+INT", "TOSA-1.0+INT+int16+int4+cf"] {
+            let config = PipelineConfig::from_tosa_spec(spec);
+            for steps in [
+                lowering_steps(true, &config),
+                build_ir_cond_submodule_pipeline(&config),
+            ] {
+                let mut graph = IrGraph::empty();
+                let features = input(&mut graph, "features", &[2, 8, 2], "torch.int8");
+                let indices = input(&mut graph, "indices", &[2, 3], "torch.int32");
+                let unsqueeze = call_with_meta(
+                    &mut graph,
+                    "unsqueeze",
+                    "aten.unsqueeze_copy.default",
+                    vec![IrArg::Node(indices), IrArg::Int(-1)],
+                    value(&[2, 3, 1], "torch.int32"),
+                );
+                let expand = call_with_meta(
+                    &mut graph,
+                    "expand",
+                    "aten.expand_copy.default",
+                    vec![
+                        IrArg::Node(unsqueeze),
+                        IrArg::List(vec![IrArg::Int(-1), IrArg::Int(-1), IrArg::Int(2)]),
+                    ],
+                    value(&[2, 3, 2], "torch.int32"),
+                );
+                let cast = graph.add_node_with_kwargs(
+                    NodeOp::CallFunction,
+                    "cast".to_owned(),
+                    "dim_order_ops._to_dim_order_copy.default".to_owned(),
+                    vec![IrArg::Node(expand)],
+                    HashMap::from([("dtype".to_owned(), IrArg::Dtype("torch.int64".to_owned()))]),
+                    value(&[2, 3, 2], "torch.int64"),
+                );
+                let gather = call_with_meta(
+                    &mut graph,
+                    "gather",
+                    "aten.gather.default",
+                    vec![IrArg::Node(features), IrArg::Int(1), IrArg::Node(cast)],
+                    value(&[2, 3, 2], "torch.int8"),
+                );
+                output(&mut graph, gather);
+
+                crate::stock_fallback::take();
+                run_steps(&steps, &mut graph);
+                assert_eq!(crate::stock_fallback::take(), None, "{spec}");
+
+                assert!(
+                    !graph.live_nodes().any(|node| node.name == "cast"),
+                    "{spec}"
+                );
+                let gathers: Vec<_> = graph
+                    .live_nodes()
+                    .filter(|node| node.target == "backend.tosa.GATHER.default")
+                    .collect();
+                assert_eq!(gathers.len(), 1, "{spec}");
+                // CanonicalizeGather's rank-3 path permutes and flattens the indices
+                // to [N*C, W]; above that is the expand of the unsqueeze (a view by
+                // now) of the int32 input. Data movement only, so the serializer
+                // gives each of them the input's INT32
+                // (`serialize::explicit_gather_index_tests`).
+                let mut index = gathers[0].args[1].as_node().expect("an index node");
+                assert_eq!(graph.node_shape(index), Some([4, 3].as_slice()), "{spec}");
+                let mut chain = Vec::new();
+                while let Some(input) = graph.node(index).args.first().and_then(IrArg::as_node) {
+                    chain.push(graph.node(index).target.as_str());
+                    index = input;
+                }
+                assert_eq!(graph.node(index).name, "indices", "{spec}");
+                assert_eq!(
+                    chain,
+                    [
+                        "aten.view_copy.default",
+                        "aten.permute_copy.default",
+                        "aten.expand_copy.default",
+                        "aten.view_copy.default"
+                    ],
+                    "{spec}"
+                );
+            }
+        }
     }
 
     /// rc4's `linear_pc` graph at RewriteConvPass, a per-channel quantized Linear,
