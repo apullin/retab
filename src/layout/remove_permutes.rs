@@ -2221,7 +2221,21 @@ fn eliminate_dead_from(ctx: &mut LayoutCtx<'_>, candidates: impl IntoIterator<It
 /// graph order: the seeds always, and any other node once the value of one of
 /// its inputs, as that node sees it, has changed. A user rewired off a
 /// bypassed permute saw the permute's value before. In a correct rewrite only
-/// the seeds and the sink views below the region are recomputed.
+/// the seeds and the sink views below the region are recomputed, and the
+/// nodes a dtype change reaches.
+///
+/// RETAB's IR can record a view or permute copy with the float dtype of the
+/// op it came from, such as the views DecomposeLinear makes from a linear's
+/// meta, below a producer that records an integer dtype. Re-derived, such a
+/// copy takes its producer's dtype (see `layout::shape`), so its users see a
+/// value whose dtype alone changed, and through more copies so do theirs. Any
+/// other node keeps the dtype it records, and fake execution derives its
+/// shape from its operands' shapes, so a node outside the seeds that records
+/// a dtype, and whose operands all keep the shapes it saw, keeps its value.
+/// It needs no local rule: the `aten.mm` that RETAB keeps where rc4 has a
+/// MATMUL (ConvertMmToBmmPass, APM:679) reads such views in a matmul's
+/// decomposition. A seed, whose arguments the rewrite may have changed, and
+/// a node one of whose operands changed shape still fail without a rule.
 fn refresh(ctx: &mut LayoutCtx<'_>, rewrite: &Rewrite) {
     let mut queue: BinaryHeap<Reverse<(u64, NodeId)>> = BinaryHeap::new();
     let mut queued: HashSet<NodeId> = HashSet::new();
@@ -2255,18 +2269,32 @@ fn refresh(ctx: &mut LayoutCtx<'_>, rewrite: &Rewrite) {
             }
         }
     }
+    let seeds: HashSet<NodeId> = rewrite.seeds.iter().copied().collect();
+    // The value each refreshed node had before, which its users saw.
+    let mut previous: HashMap<NodeId, Option<TensorFacts>> = HashMap::new();
     while let Some(Reverse((_, id))) = queue.pop() {
         if ctx.is_erased(id) {
             continue;
         }
         let before = ctx.node(id).meta.tensor_facts().cloned();
-        let meta = retraced_meta(ctx.graph(), id).unwrap_or_else(|error| {
-            let node = ctx.node(id);
-            panic!(
-                "RemovePermutesAroundElementwiseOps: rc4's retrace fails at {} ({}): {error}",
-                node.name, node.target
-            )
-        });
+        let meta = match retraced_meta(ctx.graph(), id) {
+            Ok(meta) => meta,
+            Err(ShapeError::Unsupported(_))
+                if !seeds.contains(&id)
+                    && operands_keep_their_shapes(ctx.graph(), rewrite, &previous, id) =>
+            {
+                let mut meta = ctx.node(id).meta.clone();
+                mark_contiguous(&mut meta);
+                meta
+            }
+            Err(error) => {
+                let node = ctx.node(id);
+                panic!(
+                    "RemovePermutesAroundElementwiseOps: rc4's retrace fails at {} ({}): {error}",
+                    node.name, node.target
+                )
+            }
+        };
         let after = meta.tensor_facts().cloned();
         *ctx.meta_mut(id) = meta;
         for user in ctx.graph().live_user_ids(id) {
@@ -2278,7 +2306,30 @@ fn refresh(ctx: &mut LayoutCtx<'_>, rewrite: &Rewrite) {
                 push(ctx, &mut queue, &mut queued, user);
             }
         }
+        previous.insert(id, before);
     }
+}
+
+/// Whether `id` records a dtype and each of its operands has the shape `id`
+/// saw: for a rewired operand the value `seen_values` records, for a
+/// refreshed one its value before the refresh, and for any other its value
+/// now. Such a node keeps its value in the retrace (see [`refresh`]).
+fn operands_keep_their_shapes(
+    graph: &IrGraph,
+    rewrite: &Rewrite,
+    previous: &HashMap<NodeId, Option<TensorFacts>>,
+    id: NodeId,
+) -> bool {
+    let node = graph.node(id);
+    node.meta.val_dtype().is_some()
+        && all_input_nodes(node).into_iter().all(|input| {
+            let now = graph.node(input).meta.tensor_facts();
+            let seen = match rewrite.seen_values.get(&(id, input)) {
+                Some(seen) => seen.as_ref(),
+                None => previous.get(&input).map_or(now, Option::as_ref),
+            };
+            seen.map(|facts| &facts.shape) == now.map(|facts| &facts.shape)
+        })
 }
 
 /// `id`'s meta with its value re-derived from its operands, as rc4's retrace
@@ -2748,6 +2799,84 @@ mod tests {
         assert_eq!(expand_shape(&[2, 1, 3], &[-1, 4, 3]), Ok(vec![2, 4, 3]));
         assert_eq!(expand_shape(&[3], &[2, 3]), Ok(vec![2, 3]));
         assert!(expand_shape(&[2, 3], &[4, 3]).is_err());
+    }
+
+    /// The linformer gauntlet models' attention, reduced: a region whose exit
+    /// permute records float32 under an int8 producer, as DecomposeLinear's
+    /// views do, read by the view a matmul's decomposition puts before
+    /// `aten.mm`, which has no local rule. The view takes int8 from its new
+    /// producer; mm, whose operands keep their shapes, keeps its value
+    /// instead of failing the retrace.
+    #[test]
+    fn a_dtype_change_reaching_an_op_without_a_rule_keeps_its_value() {
+        let mut g = LayoutGraph::new();
+        let x = g.typed_input("x", &[3, 2], "torch.int8");
+        let p = g.permute(x, &[1, 0]);
+        let r = g.call(RELU, vec![node(p)]);
+        let q = g.permute(r, &[1, 0]);
+        g.graph_mut().node_mut(q).meta = NodeMeta::tensor(vec![3, 2], "torch.float32");
+        let v = g.view(q, &[3, 2]);
+        let w = g.typed_input("w", &[2, 4], "torch.int8");
+        let mm = g.add_unrefreshed("aten.mm.default", vec![node(v), node(w)]);
+        g.graph_mut().node_mut(mm).meta = NodeMeta::tensor(vec![3, 4], "torch.int32");
+        g.output(&[mm]);
+        assert_eq!(g.dtype(v), "torch.float32");
+        let names = [x, r, v, mm].map(|id| g.name(id));
+
+        assert!(run_with(RemovePermutesConfig::tosa(), &mut g));
+
+        let [x, r, v, mm] = names.map(|name| g.id(&name));
+        assert_eq!(g.count(PERMUTE), 0);
+        assert_eq!(g.graph().node(r).args[0].as_node(), Some(x));
+        assert_eq!(g.graph().node(v).args[0].as_node(), Some(r));
+        assert_eq!((g.shape(v), g.dtype(v)), (&[3, 2][..], "torch.int8"));
+        assert_eq!((g.shape(mm), g.dtype(mm)), (&[3, 4][..], "torch.int32"));
+        assert_eq!(g.graph().node(mm).meta.val_dim_order(), Some(&[0, 1][..]));
+    }
+
+    /// A node without a rule keeps its value only when it records a dtype and
+    /// every operand has the shape it saw: a rewired operand's recorded value,
+    /// a refreshed operand's value before the refresh, or the value now.
+    #[test]
+    fn a_node_without_a_rule_keeps_its_value_only_if_no_operand_shape_changed() {
+        let mut g = LayoutGraph::new();
+        let a = g.typed_input("a", &[3, 2], "torch.int8");
+        let b = g.typed_input("b", &[2, 4], "torch.int8");
+        let mm = g.add_unrefreshed("aten.mm.default", vec![node(a), node(b)]);
+        g.graph_mut().node_mut(mm).meta = NodeMeta::tensor(vec![3, 4], "torch.int32");
+        let graph = g.graph();
+        let facts = |shape: &[i64], dtype: &str| Some(TensorFacts::new(shape.to_vec(), dtype));
+        let mut rewrite = Rewrite::default();
+        let mut previous = HashMap::new();
+        assert!(operands_keep_their_shapes(graph, &rewrite, &previous, mm));
+
+        // A dtype change alone, rewired or refreshed, keeps the value.
+        rewrite
+            .seen_values
+            .insert((mm, a), facts(&[3, 2], "torch.float32"));
+        previous.insert(b, facts(&[2, 4], "torch.float32"));
+        assert!(operands_keep_their_shapes(graph, &rewrite, &previous, mm));
+
+        // A shape change does not, through either route.
+        previous.insert(b, facts(&[4, 2], "torch.int8"));
+        assert!(!operands_keep_their_shapes(graph, &rewrite, &previous, mm));
+        previous.insert(b, facts(&[2, 4], "torch.int8"));
+        rewrite
+            .seen_values
+            .insert((mm, a), facts(&[2, 3], "torch.int8"));
+        assert!(!operands_keep_their_shapes(graph, &rewrite, &previous, mm));
+
+        // Without a recorded dtype, the value would follow the operands'.
+        let mut untyped = LayoutGraph::new();
+        let a = untyped.typed_input("a", &[3, 2], "torch.int8");
+        let b = untyped.typed_input("b", &[2, 4], "torch.int8");
+        let mm = untyped.add_unrefreshed("aten.mm.default", vec![node(a), node(b)]);
+        assert!(!operands_keep_their_shapes(
+            untyped.graph(),
+            &Rewrite::default(),
+            &HashMap::new(),
+            mm
+        ));
     }
 }
 
